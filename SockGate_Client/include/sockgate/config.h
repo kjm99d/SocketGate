@@ -75,7 +75,8 @@ typedef struct SG_ClientConfig {
     uint16_t reserved0;
 
     /* Limits and timeouts */
-    uint32_t connect_timeout_ms; /* default 10000; covers TCP, proxy and TLS handshake */
+    uint32_t connect_timeout_ms; /* default 10000; one budget for the system proxy lookup,
+                                    name resolution, TCP, the proxy and the TLS handshake */
     uint32_t io_timeout_ms;      /* default 30000; 0 = no timeout */
     uint32_t max_payload_size;   /* default 1 MiB, max 16 MiB */
     uint32_t reserved1;
