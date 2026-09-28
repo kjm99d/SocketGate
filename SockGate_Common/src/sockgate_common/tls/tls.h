@@ -117,4 +117,15 @@ ITlsProvider& DefaultTlsProvider();
 // SHA-256 over the DER SubjectPublicKeyInfo of the first certificate in a PEM blob.
 Status ComputeSpkiPinFromPem(ByteView certificate_pem, crypto::Sha256Digest* out);
 
+// True for OpenSSL versions before upstream 3.0.7 (X.509 verification
+// CVE-2022-3602/3786).
+bool IsOutdatedOpenSsl(unsigned long version_num);
+
+// The runtime OpenSSL version string if this build ships its own OpenSSL
+// (Windows, or a static link) and that OpenSSL is outdated; nullptr
+// otherwise. A system (distribution) OpenSSL is never reported: distributions
+// backport security fixes without changing the version number, so the build
+// warns about it at configure time instead (design 12 §1).
+const char* OutdatedBundledOpenSslVersion();
+
 }  // namespace sg::tls

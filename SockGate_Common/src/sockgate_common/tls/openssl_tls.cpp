@@ -529,4 +529,15 @@ Status ComputeSpkiPinFromPem(ByteView certificate_pem, crypto::Sha256Digest* out
     return SpkiDigest(cert.get(), out);
 }
 
+bool IsOutdatedOpenSsl(unsigned long version_num) { return version_num < 0x30000070UL; }
+
+const char* OutdatedBundledOpenSslVersion()
+{
+#if defined(SOCKGATE_BUNDLED_OPENSSL) && SOCKGATE_BUNDLED_OPENSSL
+    return IsOutdatedOpenSsl(OpenSSL_version_num()) ? OpenSSL_version(OPENSSL_VERSION) : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
 }  // namespace sg::tls

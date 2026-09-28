@@ -15,7 +15,9 @@
 - **보안 최소 요구**: 알려진 취약점이 패치된 OpenSSL. 업스트림 기준 3.0.7 미만(CVE-2022-3602/3786, X.509 검증 중 overflow)은
   사용 금지. 업스트림 3.0 계열은 2026-09-07 EOL 이므로 **3.5 LTS 이상을 권장**한다.
   배포판 패키지(예: Ubuntu 22.04 의 3.0.2)는 버전 번호와 무관하게 보안 패치가 백포트되므로 배포판 보안 업데이트를 적용한 상태를 전제로 한다.
-  실행 시 `OpenSSL_version_num() < 3.0.7` 이고 배포판 빌드가 아니면 경고 로그를 남긴다.
+  배포판 OpenSSL 은 버전 번호로 패치 여부를 알 수 없으므로 configure 시 `OPENSSL_VERSION < 3.0.7` 이면 CMake 경고만 낸다.
+  OpenSSL 을 함께 배포하는 빌드(Windows, 또는 정적 링크)는 실행 시 `OpenSSL_version_num() < 3.0.7` 이면
+  `event=config_warning` 경고를 남긴다 (서버는 시작 시, 클라이언트는 프로세스당 첫 Connect 시 1회).
 - Windows 는 OpenSSL 을 **정적 링크**하여 `sockgate_client.dll` 하나로 배포할 수 있게 한다 (DLL hijacking 표면 축소).
   Linux 는 기본적으로 시스템 OpenSSL 에 동적 링크한다 (보안 업데이트를 배포판이 제공).
 - 배포판별 OpenSSL: Ubuntu 22.04 = 3.0.2, Ubuntu 24.04 = 3.0.13, Debian 12 = 3.0.x, Rocky 9 = 3.0.x/3.2.x → 모두 지원.

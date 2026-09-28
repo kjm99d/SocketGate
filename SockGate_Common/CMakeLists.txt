@@ -32,6 +32,13 @@ endif()
 
 add_library(sockgate_common STATIC ${SG_COMMON_SOURCES})
 add_library(SockGate::Common ALIAS sockgate_common)
+# OpenSSL shipped with the application (Windows, or linked statically) rather
+# than a distribution's: only then is a runtime version warning meaningful.
+if(WIN32 OR OPENSSL_USE_STATIC_LIBS)
+    target_compile_definitions(sockgate_common PRIVATE SOCKGATE_BUNDLED_OPENSSL=1)
+else()
+    target_compile_definitions(sockgate_common PRIVATE SOCKGATE_BUNDLED_OPENSSL=0)
+endif()
 
 target_include_directories(sockgate_common
     PUBLIC

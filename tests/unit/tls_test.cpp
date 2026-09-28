@@ -174,6 +174,26 @@ SG_TEST(Tls, CaCertificateCannotActAsLeafSigner)
     SG_EXPECT_STATUS(PumpHandshake(*p.client, *p.server), SG_CERTIFICATE_ERROR);
 }
 
+SG_TEST(Tls, OutdatedOpenSslIsReported)
+{
+    SG_EXPECT(tls::IsOutdatedOpenSsl(0x1010117FUL));   // 1.1.1w
+    SG_EXPECT(tls::IsOutdatedOpenSsl(0x30000020UL));   // 3.0.2
+    SG_EXPECT(tls::IsOutdatedOpenSsl(0x30000060UL));   // 3.0.6
+    SG_EXPECT(!tls::IsOutdatedOpenSsl(0x30000070UL));  // 3.0.7
+    SG_EXPECT(!tls::IsOutdatedOpenSsl(0x30100000UL));  // 3.1.0
+    SG_EXPECT(!tls::IsOutdatedOpenSsl(0x30500040UL));  // 3.5.4
+    // Only a bundled, outdated OpenSSL is reported, with its version string.
+    const char* version = tls::OutdatedBundledOpenSslVersion();
+    if (version != nullptr) {
+        SG_EXPECT(tls::IsOutdatedOpenSsl(OpenSSL_version_num()));
+        SG_EXPECT(std::strstr(version, "OpenSSL") != nullptr);
+    }
+#ifdef _WIN32
+    // Windows builds always ship their OpenSSL.
+    SG_EXPECT((version != nullptr) == tls::IsOutdatedOpenSsl(OpenSSL_version_num()));
+#endif
+}
+
 SG_TEST(Tls, SpkiPinning)
 {
     const TestCert ca = CreateRootCa("CA");

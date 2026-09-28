@@ -47,6 +47,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL 3.0 REQUIRED)
+if(OPENSSL_VERSION VERSION_LESS 3.0.7)
+    message(WARNING "SockGate: OpenSSL ${OPENSSL_VERSION} predates 3.0.7 (CVE-2022-3602/3786). "
+                    "Use it only if it is a distribution build with the security fixes backported.")
+endif()
 
 if(WIN32)
     set(SOCKGATE_PLATFORM "windows")

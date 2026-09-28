@@ -7,6 +7,7 @@
 #include "sockgate_common/protocol/enrollment_token.h"
 #include "sockgate_common/protocol/messages.h"
 #include "sockgate_common/protocol/transcript.h"
+#include "sockgate_common/tls/tls.h"
 
 #include <algorithm>
 #include <cstring>
@@ -207,6 +208,17 @@ Status ClientSession::Connect(const ServerTarget& target)
     tls_config.allow_tls12 = (settings_.flags & SG_CLIENT_FLAG_ALLOW_TLS12) != 0;
     std::shared_ptr<tls::ITlsContext> context;
     SG_TRY(tls::DefaultTlsProvider().CreateClientContext(tls_config, &context));
+
+    // Once per process, to the first client that logs warnings at all.
+    static std::atomic<bool> openssl_checked{false};
+    if (settings_.logger.Enabled(SG_LOG_WARN) && !openssl_checked.exchange(true)) {
+        if (const char* outdated = tls::OutdatedBundledOpenSslVersion()) {
+            SG_LOGW(settings_.logger,
+                    "event=config_warning detail=\"bundled %s predates OpenSSL 3.0.7: rebuild with a current "
+                    "OpenSSL\"",
+                    outdated);
+        }
+    }
 
     state_.store(SG_CLIENT_STATE_CONNECTING);
     std::shared_ptr<net::ITransport> transport;

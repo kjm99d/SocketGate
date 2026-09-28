@@ -6,6 +6,7 @@
 
 #include "sockgate_common/core/clock.h"
 #include "sockgate_common/protocol/enrollment_token.h"
+#include "sockgate_common/tls/tls.h"
 
 #include <chrono>
 
@@ -120,6 +121,12 @@ Status ServerEngine::Start()
     running_ = true;
     SG_LOGI(config_.logger, "event=server_started address=%s port=%u", config_.bind_address.c_str(),
             static_cast<unsigned>(port_));
+    if (const char* outdated = tls::OutdatedBundledOpenSslVersion()) {
+        SG_LOGW(config_.logger,
+                "event=config_warning detail=\"bundled %s predates OpenSSL 3.0.7: rebuild with a current "
+                "OpenSSL\"",
+                outdated);
+    }
     return OkStatus();
 }
 
