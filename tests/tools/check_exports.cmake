@@ -7,6 +7,8 @@
 # Windows: `dumpbin /exports` (or `llvm-readobj --coff-exports`) on the DLL.
 # ELF: `nm -D --defined-only`.
 
+cmake_policy(VERSION 3.21)  # script mode: without this CMake 3.x keeps pre-3.3 policies (no IN_LIST)
+
 foreach(var LIB MODE TOOL HEADERS MACRO)
     if(NOT DEFINED ${var})
         message(FATAL_ERROR "check_exports.cmake: ${var} not set")
