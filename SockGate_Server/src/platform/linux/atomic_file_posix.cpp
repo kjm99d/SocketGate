@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <string>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -28,7 +29,31 @@ std::string DirectoryOf(const std::string& path)
     return path.substr(0, slash);
 }
 
+class PosixStoreLock final : public StoreLock {
+public:
+    explicit PosixStoreLock(int fd) : fd_(fd) {}
+    ~PosixStoreLock() override { ::close(fd_); }  // releases the flock
+
+private:
+    int fd_;
+};
+
 }  // namespace
+
+Status LockStore(const std::string& path, std::unique_ptr<StoreLock>* out)
+{
+    if (out == nullptr || path.empty()) return SG_INVALID_ARGUMENT;
+    const std::string lock = path + ".lock";
+    const int fd = ::open(lock.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return SG_STORAGE_ERROR;
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        const int err = errno;
+        ::close(fd);
+        return err == EWOULDBLOCK ? Status(SG_INVALID_STATE) : Status(SG_STORAGE_ERROR);
+    }
+    *out = std::make_unique<PosixStoreLock>(fd);
+    return OkStatus();
+}
 
 Status ReadWholeFile(const std::string& path, Bytes* out)
 {

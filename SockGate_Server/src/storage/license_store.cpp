@@ -140,6 +140,7 @@ public:
 
     Status Load()
     {
+        SG_TRY(LockStore(path_, &lock_));  // one process at a time (see LockStore)
         Bytes data;
         const Status st = ReadWholeFile(path_, &data);
         if (st == SG_NOT_FOUND) return OkStatus();
@@ -213,6 +214,7 @@ private:
     }
 
     const std::string path_;
+    std::unique_ptr<StoreLock> lock_;
 };
 
 }  // namespace

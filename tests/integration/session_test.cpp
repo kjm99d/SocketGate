@@ -465,7 +465,9 @@ SG_TEST(Session, RevocationTakesEffectWhenStorageFails)
     SG_IdentityInfo_Init(&id);
     SG_ASSERT_OK(SG_Client_GetIdentity(client.get(), &id));
 
-    fs::remove_all(dir);  // the revocation cannot be persisted...
+    // The revocation cannot be persisted (the store's path is now a directory)...
+    fs::remove(dir / "registry.bin");
+    fs::create_directory(dir / "registry.bin");
     SG_EXPECT_STATUS(SG_Server_RevokeClient(server.server, &id.installation_id), SG_STORAGE_ERROR);
     // ...but the live session is closed and the installation is refused.
     char buf[16];
@@ -474,6 +476,9 @@ SG_TEST(Session, RevocationTakesEffectWhenStorageFails)
     const SG_ServerConfig t = Target(server.port);
     SG_ASSERT_OK(SG_Client_Connect(client.get(), &t));
     SG_EXPECT_STATUS(SG_Client_Authenticate(client.get()), SG_SERVER_REJECTED);
+    server.Destroy();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }
 
 SG_TEST(Session, ConcurrentSendersAndReceiver)

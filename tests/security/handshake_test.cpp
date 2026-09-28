@@ -631,12 +631,36 @@ SG_TEST(Registry, RevocationSurvivesStorageFailure)
     rec.public_key = id.public_key;
     SG_ASSERT_OK(reg->Register(rec));
 
-    fs::remove_all(dir);  // every further write fails
+    // Every further write fails: the store's path is now a directory.
+    fs::remove(dir / "registry.bin");
+    fs::create_directory(dir / "registry.bin");
     SG_EXPECT_STATUS(reg->Revoke(id.installation_id), SG_STORAGE_ERROR);
     ClientRecord after;
     SG_ASSERT_OK(reg->Find(id.installation_id, &after));
     SG_EXPECT(after.status == ClientStatus::kRevoked);
     SG_EXPECT_OK(reg->Revoke(id.installation_id));  // idempotent from now on
+    reg.reset();
+    fs::remove_all(dir);
+}
+
+SG_TEST(Registry, StoresAreLockedWhileOpen)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-lock-" + std::to_string(sg::MonotonicMs()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "registry.bin").string();
+    {
+        std::unique_ptr<IClientRegistry> first;
+        SG_ASSERT_OK(CreateFileClientRegistry(path, &first));
+        // A second user of the same store (another process, e.g. sg_admin
+        // while the server runs) would lose updates: refused.
+        std::unique_ptr<IClientRegistry> second;
+        SG_EXPECT_STATUS(CreateFileClientRegistry(path, &second), SG_INVALID_STATE);
+    }
+    std::unique_ptr<IClientRegistry> after;
+    SG_EXPECT_OK(CreateFileClientRegistry(path, &after));  // released with the first store
+    after.reset();
+    fs::remove_all(dir);
 }
 
 SG_TEST(Registry, FilePersistenceAndCorruption)

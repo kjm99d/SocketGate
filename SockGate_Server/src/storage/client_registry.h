@@ -63,7 +63,8 @@ public:
 std::unique_ptr<IClientRegistry> CreateMemoryClientRegistry();
 
 // Registry persisted to `path` (atomic replace on every change). Loads the
-// existing file, validating every record as untrusted input.
+// existing file, validating every record as untrusted input. Holds an
+// exclusive lock on the store while open: SG_INVALID_STATE if it is in use.
 Status CreateFileClientRegistry(const std::string& path, std::unique_ptr<IClientRegistry>* out);
 
 }  // namespace sg::server

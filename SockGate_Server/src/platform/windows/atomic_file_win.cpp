@@ -54,7 +54,39 @@ Status OwnerOnlySecurityDescriptor(PSECURITY_DESCRIPTOR* out)
     return OkStatus();
 }
 
+class WinStoreLock final : public StoreLock {
+public:
+    explicit WinStoreLock(HANDLE h) : h_(h) {}
+    ~WinStoreLock() override { CloseHandle(h_); }  // also releases the byte-range lock
+
+private:
+    HANDLE h_;
+};
+
 }  // namespace
+
+Status LockStore(const std::string& path, std::unique_ptr<StoreLock>* out)
+{
+    if (out == nullptr) return SG_INVALID_ARGUMENT;
+    std::wstring wpath;
+    if (!ToWide(path + ".lock", &wpath)) return SG_INVALID_ARGUMENT;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SG_TRY(OwnerOnlySecurityDescriptor(&sd));
+    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+    const HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, OPEN_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+    LocalFree(sd);
+    if (h == INVALID_HANDLE_VALUE) return SG_STORAGE_ERROR;
+    OVERLAPPED at{};
+    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &at)) {
+        const DWORD err = GetLastError();
+        CloseHandle(h);
+        return err == ERROR_LOCK_VIOLATION ? Status(SG_INVALID_STATE) : Status(SG_STORAGE_ERROR);
+    }
+    *out = std::make_unique<WinStoreLock>(h);
+    return OkStatus();
+}
 
 Status ReadWholeFile(const std::string& path, Bytes* out)
 {

@@ -251,7 +251,9 @@ SG_TEST(LicenseStore, RevocationSurvivesStorageFailure)
     bool newly = false;
     SG_ASSERT_OK(store->BindSeat("L1", Iid(1), &newly));
 
-    fs::remove_all(dir);  // every further write fails
+    // Every further write fails: the store's path is now a directory.
+    fs::remove(dir / "licenses.bin");
+    fs::create_directory(dir / "licenses.bin");
     SG_EXPECT_STATUS(store->Revoke("L1"), SG_STORAGE_ERROR);
     LicenseRecord rec;
     SG_ASSERT_OK(store->Find("L1", &rec));
@@ -261,6 +263,12 @@ SG_TEST(LicenseStore, RevocationSurvivesStorageFailure)
     SG_EXPECT_STATUS(store->Find("L2", &rec), SG_NOT_FOUND);
     SG_EXPECT(!store->ReleaseSeat("L1", Iid(1)).ok());
     SG_EXPECT_OK(store->HasSeat("L1", Iid(1)));
+
+    // The store is locked while open.
+    std::unique_ptr<ILicenseStore> second;
+    SG_EXPECT_STATUS(CreateFileLicenseStore((dir / "licenses.bin").string(), &second), SG_INVALID_STATE);
+    store.reset();
+    fs::remove_all(dir);
 }
 
 SG_TEST(Authorization, GrantsOnlyLicensedFeatures)
