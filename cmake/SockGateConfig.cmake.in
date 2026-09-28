@@ -1,0 +1,33 @@
+@PACKAGE_INIT@
+
+# SockGate @PROJECT_VERSION@: SockGate::Client, SockGate::Server
+include(CMakeFindDependencyMacro)
+
+# Runs in a function so that pkg_check_modules' TSS2_* variables do not leak
+# into the caller; the imported target PkgConfig::TSS2 (which the exported
+# targets link) is directory-scoped and stays visible. A PkgConfig::TSS2 the
+# caller already created is reused, not overwritten.
+function(_sockgate_find_tss2)
+    pkg_check_modules(TSS2 QUIET IMPORTED_TARGET tss2-esys tss2-mu tss2-tctildr)
+endfunction()
+
+if(NOT @SOCKGATE_BUILD_SHARED@)
+    # Static libraries: the application links SockGate's dependencies.
+    find_dependency(Threads)
+    find_dependency(OpenSSL 3.0)
+    if(@SOCKGATE_WITH_TPM2@)
+        find_dependency(PkgConfig)
+        if(NOT TARGET PkgConfig::TSS2)
+            _sockgate_find_tss2()
+        endif()
+        if(NOT TARGET PkgConfig::TSS2)
+            set(SockGate_FOUND FALSE)
+            set(SockGate_NOT_FOUND_MESSAGE
+                "SockGate was built with TPM 2.0 support: tss2-esys, tss2-mu and tss2-tctildr are required")
+            return()
+        endif()
+    endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/SockGateTargets.cmake")
+check_required_components(SockGate)

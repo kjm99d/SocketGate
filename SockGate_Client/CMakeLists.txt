@@ -83,12 +83,7 @@ target_include_directories(sockgate_client
 target_link_libraries(sockgate_client PRIVATE sockgate_client_core)
 set_target_properties(sockgate_client PROPERTIES
     VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
+    SOVERSION ${SOCKGATE_SOVERSION}
     C_STANDARD 11)
 sockgate_configure_target(sockgate_client)
 
-install(TARGETS sockgate_client
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib)
-install(DIRECTORY include/sockgate DESTINATION include)

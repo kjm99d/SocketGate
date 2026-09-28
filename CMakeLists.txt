@@ -27,6 +27,14 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 0.x: any minor version may break the ABI, so it is part of the soname
+# (libsockgate_client.so.0.1); from 1.0 on only the major version is.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+    set(SOCKGATE_SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+else()
+    set(SOCKGATE_SOVERSION "${PROJECT_VERSION_MAJOR}")
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SockGateOptions)
 include(SockGateCompilerFlags)
@@ -51,6 +59,10 @@ endif()
 add_subdirectory(SockGate_Common)
 add_subdirectory(SockGate_Client)
 add_subdirectory(SockGate_Server)
+
+if(SOCKGATE_INSTALL)
+    include(SockGateInstall)
+endif()
 
 if(SOCKGATE_BUILD_TESTS)
     enable_testing()

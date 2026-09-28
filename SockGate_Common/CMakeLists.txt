@@ -53,4 +53,3 @@ endif()
 
 sockgate_configure_target(sockgate_common)
 
-install(DIRECTORY include/sockgate DESTINATION include)

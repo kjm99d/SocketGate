@@ -3,6 +3,8 @@ option(SOCKGATE_BUILD_TESTS    "Build unit, protocol, security and integration t
 option(SOCKGATE_BUILD_FUZZERS  "Build libFuzzer targets (Clang or MSVC /fsanitize=fuzzer)" OFF)
 option(SOCKGATE_BUILD_EXAMPLES "Build C examples" ON)
 option(SOCKGATE_BUILD_TOOLS    "Build administration tools" ON)
+# Off when SockGate is a subproject (add_subdirectory / FetchContent).
+option(SOCKGATE_INSTALL        "Generate install rules and the SockGate CMake package" ${PROJECT_IS_TOP_LEVEL})
 option(SOCKGATE_WERROR         "Treat compiler warnings as errors" OFF)
 option(SOCKGATE_HARDENING      "Enable platform hardening compiler/linker flags" ON)
 option(SOCKGATE_WITH_TPM2      "Build the Linux TPM2 key store (requires tpm2-tss)" OFF)
