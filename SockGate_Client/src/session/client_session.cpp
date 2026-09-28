@@ -203,6 +203,14 @@ Status ClientSession::Connect(const ServerTarget& target)
     if (s != SG_CLIENT_STATE_DISCONNECTED && s != SG_CLIENT_STATE_CLOSED && s != SG_CLIENT_STATE_EXPIRED) {
         return SG_INVALID_STATE;
     }
+    // A Disconnect() from another thread from here on changes link_.generation:
+    // this attempt then ends with SG_CLOSED (checked before and after each step).
+    uint64_t attempt;
+    bool aborted = false;
+    {
+        std::lock_guard<std::mutex> lock(link_mutex_);
+        attempt = link_.generation;
+    }
     SG_TRY(ValidateTarget(target));
 
     tls::TlsClientConfig tls_config;
@@ -226,19 +234,19 @@ Status ClientSession::Connect(const ServerTarget& target)
         }
     }
 
-    // A Disconnect() from another thread while this runs changes
-    // link_.generation: from then on this attempt ends with SG_CLOSED.
-    uint64_t attempt;
     {
         std::lock_guard<std::mutex> lock(link_mutex_);
-        attempt = link_.generation;
-        state_.store(SG_CLIENT_STATE_CONNECTING);
+        aborted = link_.generation != attempt;  // Disconnect() during validation / trust setup
+        if (!aborted) state_.store(SG_CLIENT_STATE_CONNECTING);
+    }
+    if (aborted) {
+        SG_LOGI(settings_.logger, "event=connect_aborted host=%s", target.host.c_str());
+        return SG_CLOSED;
     }
     // One budget for resolution, TCP, the proxy and the TLS handshake together.
     const Deadline connect_deadline(settings_.connect_timeout_ms);
     std::shared_ptr<net::ITransport> transport;
     const Status connected = OpenTransport(target, attempt, &transport);
-    bool aborted;
     {
         std::lock_guard<std::mutex> lock(link_mutex_);
         connecting_transport_.reset();
