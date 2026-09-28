@@ -31,6 +31,7 @@ public:
 
     Status Connect(const net::Endpoint& endpoint) override;
     Status Send(const uint8_t* data, size_t size) override;
+    Status SendFor(const uint8_t* data, size_t size, uint32_t timeout_ms) override;
     Status Receive(uint8_t* buffer, size_t capacity, size_t* received) override;
     Status ReceiveFor(uint8_t* buffer, size_t capacity, size_t* received, uint32_t timeout_ms) override;
     void Shutdown() noexcept override;

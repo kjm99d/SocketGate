@@ -18,6 +18,7 @@ struct AuthorizationRequest {
     const ClientRecord* record = nullptr;  // verified registry entry
     proto::AuthMode mode = proto::AuthMode::kAuthenticate;
     bool reauthentication = false;
+    uint64_t session_handle = 0;
     // Client claims:
     std::string product_id;
     std::string product_version;

@@ -95,6 +95,7 @@ public:
     // Other errors: protocol violation, close without reply.
     Status OnClientProof(const proto::DecodedFrame& frame, Bytes* reply, HandshakeOutcome* outcome);
 
+    void set_session_handle(uint64_t handle) noexcept { session_handle_ = handle; }
     proto::Phase phase() const noexcept { return phase_; }
     const std::string& failure_reason() const noexcept { return failure_reason_; }
     const proto::SessionId& session_id() const noexcept { return session_id_; }
@@ -121,6 +122,7 @@ private:
     uint64_t challenge_issued_at_ = 0;
     bool challenge_consumed_ = false;
     uint16_t selected_version_ = 0;
+    uint64_t session_handle_ = 0;
 };
 
 // Generates a random, non-zero session id.

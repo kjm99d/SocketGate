@@ -145,6 +145,11 @@ Status TcpTransport::ConnectOne(const platform::SocketAddress& address, uint32_t
 
 Status TcpTransport::Send(const uint8_t* data, size_t size)
 {
+    return SendFor(data, size, options_.io_timeout_ms);
+}
+
+Status TcpTransport::SendFor(const uint8_t* data, size_t size, uint32_t timeout_ms)
+{
     if (data == nullptr && size != 0) return SG_INVALID_ARGUMENT;
     // Registered as in flight *before* waiting for the serial lock, so Close()
     // (and the destructor) wait until this thread has released send_mutex_.
@@ -152,7 +157,7 @@ Status TcpTransport::Send(const uint8_t* data, size_t size)
     SG_TRY(op.status());
     std::lock_guard<std::mutex> serial(send_mutex_);
 
-    const Deadline deadline(options_.io_timeout_ms);
+    const Deadline deadline(timeout_ms);
     size_t offset = 0;
     while (offset < size) {
         if (op.ShutdownRequested()) return SG_CLOSED;

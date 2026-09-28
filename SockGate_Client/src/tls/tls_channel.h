@@ -19,7 +19,7 @@ namespace sg::client {
 
 class TlsChannel {
 public:
-    TlsChannel(std::unique_ptr<net::ITransport> transport, std::unique_ptr<tls::ITlsEngine> engine);
+    TlsChannel(std::shared_ptr<net::ITransport> transport, std::unique_ptr<tls::ITlsEngine> engine);
     ~TlsChannel();
 
     TlsChannel(const TlsChannel&) = delete;
@@ -28,8 +28,10 @@ public:
     // Runs the TLS handshake (including certificate, hostname and pin checks).
     Status Handshake(uint32_t timeout_ms);
 
-    // Encrypts and sends all bytes.
+    // Encrypts and sends all bytes (transport I/O timeout).
     Status Send(const uint8_t* data, size_t size);
+    // As Send with an explicit bound on the network write.
+    Status SendFor(const uint8_t* data, size_t size, uint32_t timeout_ms);
 
     // Receives decrypted bytes (at least one). kNoTimeout waits indefinitely.
     // SG_CLOSED after close_notify or end-of-stream, SG_TIMEOUT on deadline.
@@ -42,16 +44,17 @@ public:
     std::string ErrorDetail();
     std::string PeerAddress() const;
 
-    // Best-effort close_notify, then transport shutdown. Thread-safe.
-    void Shutdown() noexcept;
+    // Best-effort close_notify (bounded by timeout_ms, skipped if another
+    // thread is mid-send), then transport shutdown. Thread-safe.
+    void Shutdown(uint32_t timeout_ms = 200) noexcept;
     // Wakes blocked operations without sending anything. Thread-safe.
     void Abort() noexcept;
 
 private:
-    Status Flush();
+    Status Flush(bool use_timeout = false, uint32_t timeout_ms = 0);
     void CollectOutgoingLocked();
 
-    std::unique_ptr<net::ITransport> transport_;
+    std::shared_ptr<net::ITransport> transport_;
     std::mutex tls_mutex_;
     std::unique_ptr<tls::ITlsEngine> engine_;       // guarded by tls_mutex_
     std::deque<Bytes> outbound_;                    // guarded by tls_mutex_

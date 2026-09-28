@@ -10,8 +10,11 @@
 // Request ids of requests are strictly increasing per direction; responses
 // must refer to a request id the receiver actually issued.
 //
-// Not thread-safe: the owner serialises Seal() calls (send lock) and Open()
-// calls (receive lock) separately; rekey calls must hold the relevant lock.
+// Thread-safety: Seal() calls (send side) and Open() calls (receive side)
+// may run concurrently with each other, each side serialised by its owner.
+// They touch disjoint state except the poison flag and the request-id
+// high-water mark, which are atomic. SwitchSendKey needs the send lock,
+// SwitchReceiveKey/StageReceiveKey the receive lock; Initialize both.
 #pragma once
 
 #include "sockgate_common/core/bytes.h"
@@ -45,6 +48,9 @@ public:
     Status Initialize(ByteView km, const SessionId& session_id);
 
     // ---- sending (under the owner's send lock) ------------------------------
+    // Responses must refer to a request id the peer actually sent
+    // (SG_INVALID_ARGUMENT otherwise): the peer would reject them and drop
+    // the session.
     Status Seal(MessageType type, ByteView payload, const SealOptions& options, Bytes* frame_out);
     // Allocates the next request id (strictly increasing, never 0).
     uint64_t NextRequestId() noexcept;
@@ -79,7 +85,7 @@ private:
 
     const Role role_;
     bool initialized_ = false;
-    bool poisoned_ = false;
+    std::atomic<bool> poisoned_{false};
     SessionId session_id_{};
 
     crypto::AeadKey send_key_{};
@@ -90,7 +96,7 @@ private:
     crypto::AeadKey recv_key_{};
     uint32_t recv_epoch_ = 0;
     uint64_t next_recv_seq_ = kFirstSessionSequence;
-    uint64_t last_peer_request_id_ = 0;
+    std::atomic<uint64_t> last_peer_request_id_{0};  // read by Seal() for response validation
 
     bool has_staged_ = false;
     crypto::AeadKey staged_key_{};

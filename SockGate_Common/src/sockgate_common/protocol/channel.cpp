@@ -25,10 +25,12 @@ ProtectedChannel::~ProtectedChannel()
     SecureZero(staged_key_.data(), staged_key_.size());
 }
 
+// Called on the receive side only: it destroys receive-side keys and makes
+// every later Seal()/Open() fail. The send key is left to the destructor
+// because a concurrent Seal() on the send thread may still be reading it.
 Status ProtectedChannel::Poison(Status s) noexcept
 {
-    poisoned_ = true;
-    SecureZero(send_key_.data(), send_key_.size());
+    poisoned_.store(true);
     SecureZero(recv_key_.data(), recv_key_.size());
     SecureZero(staged_key_.data(), staged_key_.size());
     has_staged_ = false;
@@ -68,8 +70,13 @@ Status ProtectedChannel::Seal(MessageType type, ByteView payload, const SealOpti
     if (!initialized_ || poisoned_) return SG_INVALID_STATE;
     if (payload.size() > kAbsoluteMaxPayload) return SG_INVALID_ARGUMENT;
     if (type != MessageType::kData && (options.request_id != 0 || options.response)) return SG_INVALID_ARGUMENT;
-    if (options.response && options.request_id == 0) return SG_INVALID_ARGUMENT;
-    if (next_send_seq_ == std::numeric_limits<uint64_t>::max()) return Poison(SG_SESSION_EXPIRED);
+    if (options.response && (options.request_id == 0 || options.request_id > last_peer_request_id_.load())) {
+        return SG_INVALID_ARGUMENT;
+    }
+    if (next_send_seq_ == std::numeric_limits<uint64_t>::max()) {
+        poisoned_.store(true);
+        return SG_SESSION_EXPIRED;
+    }
 
     FrameHeader h;
     h.type = type;
@@ -161,8 +168,8 @@ Status ProtectedChannel::Open(DecodedFrame* frame, Bytes* plaintext_frame_out)
         if ((h.flags & kFlagResponse) != 0) {
             if (h.request_id > last_request_id_.load()) return Poison(SG_PROTOCOL_ERROR);
         } else {
-            if (h.request_id <= last_peer_request_id_) return Poison(SG_REPLAY_DETECTED);  // duplicate request
-            last_peer_request_id_ = h.request_id;
+            if (h.request_id <= last_peer_request_id_.load()) return Poison(SG_REPLAY_DETECTED);  // duplicate request
+            last_peer_request_id_.store(h.request_id);
         }
     }
 

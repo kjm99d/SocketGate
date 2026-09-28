@@ -294,6 +294,7 @@ Status ServerHandshake::OnClientProof(const proto::DecodedFrame& frame, Bytes* r
     request.installation_id = hello_.installation_id;
     request.record = &record;
     request.mode = hello_.auth_mode;
+    request.session_handle = session_handle_;
     request.product_id = hello_.product_id;
     request.product_version = hello_.product_version;
     request.license_id = hello_.license_id;

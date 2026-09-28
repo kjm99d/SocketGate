@@ -21,6 +21,11 @@ inline uint64_t UnixTimeMs() noexcept
     return ms < 0 ? 0 : static_cast<uint64_t>(ms);
 }
 
+// Milliseconds elapsed from `since` to `now`, saturating at 0. Timestamps
+// taken on different threads may be observed out of order; plain unsigned
+// subtraction would then wrap to ~2^64 and trigger every timeout at once.
+constexpr uint64_t ElapsedMs(uint64_t now, uint64_t since) noexcept { return now > since ? now - since : 0; }
+
 // Deadline helper for blocking operations; timeout 0 means "no deadline".
 class Deadline {
 public:

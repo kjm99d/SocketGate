@@ -156,12 +156,29 @@ SG_TEST(Channel, RequestIdRules)
     DecodedFrame answer = Decode(SealData(p.server, "resp1", resp));
     SG_ASSERT_OK(p.client.Open(&answer));
 
-    // A response to a request the client never sent is rejected.
+    // A response to a request the peer never sent is refused by the sender...
     SealOptions bogus;
     bogus.request_id = 999;
     bogus.response = true;
-    DecodedFrame bad = Decode(SealData(p.server, "bogus", bogus));
-    SG_EXPECT_STATUS(p.client.Open(&bad), SG_PROTOCOL_ERROR);
+    Bytes refused;
+    SG_EXPECT_STATUS(p.server.Seal(MessageType::kData, ByteView(), bogus, &refused), SG_INVALID_ARGUMENT);
+    // ...and by the receiver when a misbehaving peer sends it anyway. A shadow
+    // server channel (same keys) that did receive request 999 from a shadow
+    // client produces a correctly sealed response the real client never asked for.
+    ProtectedChannel shadow_client(Role::kClient);
+    ProtectedChannel shadow_server(Role::kServer);
+    SG_ASSERT_OK(shadow_client.Initialize(p.km, p.sid));
+    SG_ASSERT_OK(shadow_server.Initialize(p.km, p.sid));
+    SealOptions high;
+    high.request_id = 999;
+    DecodedFrame high_req = Decode(SealData(shadow_client, "x", high));
+    SG_ASSERT_OK(shadow_server.Open(&high_req));
+    (void)SealData(shadow_server, "pad");  // seq 3, already used by "resp1" towards p.client
+    SealOptions unsolicited;
+    unsolicited.request_id = 999;
+    unsolicited.response = true;
+    DecodedFrame forged = Decode(SealData(shadow_server, "unsolicited", unsolicited));  // seq 4
+    SG_EXPECT_STATUS(p.client.Open(&forged), SG_PROTOCOL_ERROR);
 
     // Duplicate request id (a well-formed, correctly sequenced frame).
     Pair q;

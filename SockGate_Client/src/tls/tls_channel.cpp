@@ -9,7 +9,7 @@ constexpr size_t kReceiveChunk = 16 * 1024;
 
 }  // namespace
 
-TlsChannel::TlsChannel(std::unique_ptr<net::ITransport> transport, std::unique_ptr<tls::ITlsEngine> engine)
+TlsChannel::TlsChannel(std::shared_ptr<net::ITransport> transport, std::unique_ptr<tls::ITlsEngine> engine)
     : transport_(std::move(transport)), engine_(std::move(engine))
 {
 }
@@ -27,7 +27,7 @@ void TlsChannel::CollectOutgoingLocked()
     if (!chunk.empty()) outbound_.push_back(std::move(chunk));
 }
 
-Status TlsChannel::Flush()
+Status TlsChannel::Flush(bool use_timeout, uint32_t timeout_ms)
 {
     std::lock_guard<std::mutex> io(send_io_mutex_);
     for (;;) {
@@ -38,7 +38,8 @@ Status TlsChannel::Flush()
             chunk = std::move(outbound_.front());
             outbound_.pop_front();
         }
-        SG_TRY(transport_->Send(chunk.data(), chunk.size()));
+        SG_TRY(use_timeout ? transport_->SendFor(chunk.data(), chunk.size(), timeout_ms)
+                           : transport_->Send(chunk.data(), chunk.size()));
     }
 }
 
@@ -78,6 +79,17 @@ Status TlsChannel::Send(const uint8_t* data, size_t size)
         CollectOutgoingLocked();
     }
     return Flush();
+}
+
+Status TlsChannel::SendFor(const uint8_t* data, size_t size, uint32_t timeout_ms)
+{
+    if (data == nullptr && size != 0) return SG_INVALID_ARGUMENT;
+    {
+        std::lock_guard<std::mutex> lock(tls_mutex_);
+        SG_TRY(engine_->Write(ByteView(data, size)));
+        CollectOutgoingLocked();
+    }
+    return Flush(true, timeout_ms == 0 ? 1 : timeout_ms);
 }
 
 Status TlsChannel::Receive(uint8_t* buffer, size_t capacity, size_t* received, uint32_t timeout_ms)
@@ -145,7 +157,7 @@ std::string TlsChannel::ErrorDetail()
 
 std::string TlsChannel::PeerAddress() const { return transport_->PeerAddress(); }
 
-void TlsChannel::Shutdown() noexcept
+void TlsChannel::Shutdown(uint32_t timeout_ms) noexcept
 {
     {
         std::lock_guard<std::mutex> lock(tls_mutex_);
@@ -162,7 +174,7 @@ void TlsChannel::Shutdown() noexcept
                 chunk = std::move(outbound_.front());
                 outbound_.pop_front();
             }
-            if (!transport_->Send(chunk.data(), chunk.size()).ok()) break;
+            if (!transport_->SendFor(chunk.data(), chunk.size(), timeout_ms == 0 ? 1 : timeout_ms).ok()) break;
         }
     }
     transport_->Shutdown();

@@ -28,6 +28,9 @@ public:
     // Sends every byte or fails. Blocks up to the transport's I/O timeout.
     virtual Status Send(const uint8_t* data, size_t size) = 0;
 
+    // As Send, with an explicit timeout (kNoTimeout = wait indefinitely).
+    virtual Status SendFor(const uint8_t* data, size_t size, uint32_t timeout_ms) = 0;
+
     // Receives between 1 and capacity bytes. Returns SG_CLOSED on orderly
     // end-of-stream and SG_TIMEOUT when the I/O timeout elapses.
     virtual Status Receive(uint8_t* buffer, size_t capacity, size_t* received) = 0;
