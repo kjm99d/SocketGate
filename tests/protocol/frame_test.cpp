@@ -4,6 +4,7 @@
 #include "sockgate_common/protocol/rules.h"
 #include "sockgate_common/serialization/byte_order.h"
 
+#include <chrono>
 #include <random>
 
 using namespace sg;
@@ -175,6 +176,60 @@ SG_TEST(Frame, HeaderCheckRunsBeforeBodyIsBuffered)
     // The failure is sticky.
     SG_EXPECT_STATUS(d.Append(ByteView(header.data(), 1)), SG_PROTOCOL_ERROR);
     SG_EXPECT_EQ(d.Buffered(), size_t{0});
+}
+
+SG_TEST(Frame, DecoderWithoutCheckFailsClosed)
+{
+    FrameDecoder d(nullptr);
+    const Bytes wire = EncodedFrame(SampleHeader(), 4, false);
+    SG_EXPECT_STATUS(d.Append(wire), SG_INVALID_ARGUMENT);
+    DecodedFrame f;
+    bool ready = false;
+    SG_EXPECT_STATUS(d.Next(&f, &ready), SG_INVALID_ARGUMENT);
+    SG_EXPECT(!ready);
+}
+
+SG_TEST(Frame, BufferCapIsConfigurable)
+{
+    FrameDecoder d = AcceptAll();
+    d.SetMaxBuffered(kPreAuthDecoderBuffer);
+    const Bytes chunk(kPreAuthDecoderBuffer, 0);
+    SG_EXPECT_OK(d.Append(chunk));
+    SG_EXPECT_STATUS(d.Append(ByteView(chunk.data(), 1)), SG_PROTOCOL_ERROR);  // one byte over
+    FrameDecoder big = AcceptAll();
+    SG_EXPECT_STATUS(big.Append(Bytes(kMaxDecoderBuffer + 1, 0)), SG_PROTOCOL_ERROR);
+}
+
+SG_TEST(Frame, PipelinedFramesAreProcessedInLinearTime)
+{
+    // Many small frames in one append must not cause repeated large moves.
+    Bytes wire;
+    for (int i = 0; i < 20000; ++i) {
+        const Bytes one = EncodedFrame(SampleHeader(), 16, true);
+        wire.insert(wire.end(), one.begin(), one.end());
+    }
+    FrameDecoder d = AcceptAll();
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t off = 0; off < wire.size(); off += 64 * 1024) {
+        SG_ASSERT_OK(d.Append(ByteView(wire.data() + off, std::min<size_t>(64 * 1024, wire.size() - off))));
+        for (int k = 0; k < 3; ++k) {  // deliberately drain only a few frames per append
+            DecodedFrame f;
+            bool ready = false;
+            SG_ASSERT_OK(d.Next(&f, &ready));
+            if (!ready) break;
+        }
+    }
+    int drained = 0;
+    for (;;) {
+        DecodedFrame f;
+        bool ready = false;
+        SG_ASSERT_OK(d.Next(&f, &ready));
+        if (!ready) break;
+        ++drained;
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    SG_EXPECT(drained > 0);
+    SG_EXPECT(ms < 5000);
 }
 
 SG_TEST(Frame, RandomGarbageNeverCrashes)

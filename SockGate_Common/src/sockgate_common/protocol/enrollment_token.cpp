@@ -71,6 +71,7 @@ Status BuildEnrollmentToken(ByteView server_token_key, const EnrollmentClaims& c
     SG_TRY(DeriveEnrollmentKey(server_token_key, token_pub, &k_tok));
     SecureBytes raw(token_pub.begin(), token_pub.end());
     raw.insert(raw.end(), k_tok.begin(), k_tok.end());
+    if (!token->empty()) SecureZero(&(*token)[0], token->size());
     *token = ser::Base64UrlEncode(ByteView(raw));
     SecureZero(k_tok.data(), k_tok.size());
     return OkStatus();

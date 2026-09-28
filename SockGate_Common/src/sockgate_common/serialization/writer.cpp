@@ -2,6 +2,8 @@
 
 #include "sockgate_common/serialization/byte_order.h"
 
+#include <cstring>
+
 namespace sg::ser {
 
 void Writer::U8(uint8_t v) { out_->push_back(v); }
@@ -70,6 +72,11 @@ Status TlvWriter::Finish(Writer& out) const
 ByteView AsBytes(const std::string& s) noexcept
 {
     return ByteView(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+}
+
+ByteView AsBytes(const char* s) noexcept
+{
+    return s == nullptr ? ByteView() : ByteView(reinterpret_cast<const uint8_t*>(s), std::strlen(s));
 }
 
 }  // namespace sg::ser

@@ -122,6 +122,13 @@ bool IsValidProtocolString(ByteView bytes) noexcept
         if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)) return false;  // overlong
         if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
         if (cp >= 0x80 && cp <= 0x9F) return false;  // C1 controls
+        // Invisible, formatting and bidirectional-override characters enable
+        // spoofing in logs and admin interfaces; noncharacters are never valid.
+        if (cp == 0x00AD || cp == 0x061C || cp == 0x180E || cp == 0xFEFF) return false;
+        if ((cp >= 0x200B && cp <= 0x200F) || (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2060 && cp <= 0x206F)) {
+            return false;
+        }
+        if ((cp >= 0xFFF9 && cp <= 0xFFFB) || (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) == 0xFFFE) return false;
         i += len;
     }
     return true;

@@ -50,5 +50,7 @@ private:
 };
 
 ByteView AsBytes(const std::string& s) noexcept;
+// Views a NUL-terminated literal (no temporary std::string involved).
+ByteView AsBytes(const char* s) noexcept;
 
 }  // namespace sg::ser

@@ -5,14 +5,6 @@
 #include <cstring>
 
 namespace sg::proto {
-namespace {
-
-// Upper bound for buffered-but-unparsed input: one maximal frame plus slack
-// for a partially received following frame.
-constexpr size_t kMaxBuffered = kHeaderSize + kAbsoluteMaxPayload + kAuthTagSize + 256 * 1024;
-
-}  // namespace
-
 bool IsKnownMessageType(uint8_t value) noexcept
 {
     switch (static_cast<MessageType>(value)) {
@@ -92,7 +84,16 @@ Status DecodeHeader(ByteView in, FrameHeader* out)
     return OkStatus();
 }
 
-FrameDecoder::FrameDecoder(HeaderCheck check) : check_(std::move(check)) {}
+FrameDecoder::FrameDecoder(HeaderCheck check) : check_(std::move(check))
+{
+    // Fail closed: skipping the state check would accept any structurally valid frame.
+    if (!check_) failure_ = SG_INVALID_ARGUMENT;
+}
+
+void FrameDecoder::SetMaxBuffered(size_t max_bytes) noexcept
+{
+    max_buffered_ = max_bytes < kMaxDecoderBuffer ? max_bytes : kMaxDecoderBuffer;
+}
 
 Status FrameDecoder::Fail(Status s)
 {
@@ -109,15 +110,17 @@ Status FrameDecoder::Append(ByteView data)
     if (!failure_.ok()) return failure_;
     if (data.empty()) return OkStatus();
     // Compact before growing so a long-lived connection does not accumulate
-    // already-parsed bytes.
+    // already-parsed bytes. Moving the unparsed tail only when it is no larger
+    // than the consumed prefix keeps the amortised cost linear.
     if (consumed_ > 0 && consumed_ == buffer_.size()) {
+        SecureZero(buffer_.data(), buffer_.size());
         buffer_.clear();
         consumed_ = 0;
-    } else if (consumed_ > 64 * 1024) {
+    } else if (consumed_ >= 64 * 1024 && consumed_ >= Buffered()) {
         buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(consumed_));
         consumed_ = 0;
     }
-    if (data.size() > kMaxBuffered || Buffered() > kMaxBuffered - data.size()) return Fail(SG_PROTOCOL_ERROR);
+    if (data.size() > max_buffered_ || Buffered() > max_buffered_ - data.size()) return Fail(SG_PROTOCOL_ERROR);
     buffer_.insert(buffer_.end(), data.begin(), data.end());
     return OkStatus();
 }
@@ -163,9 +166,12 @@ Status EncodeFrame(FrameHeader header, ByteView payload, ByteView auth_tag, Byte
     if (auth_tag.size() != 0 && auth_tag.size() != kAuthTagSize) return SG_INVALID_ARGUMENT;
     header.payload_length = static_cast<uint32_t>(payload.size());
     header.auth_length = static_cast<uint16_t>(auth_tag.size());
-    const size_t start = out->size();
-    out->resize(start + kHeaderSize);
-    EncodeHeader(header, out->data() + start);
+    uint8_t encoded[kHeaderSize];
+    EncodeHeader(header, encoded);
+    // Never emit a header our own decoder would reject.
+    FrameHeader check;
+    if (!DecodeHeader(ByteView(encoded, kHeaderSize), &check).ok()) return SG_INVALID_ARGUMENT;
+    out->insert(out->end(), encoded, encoded + kHeaderSize);
     out->insert(out->end(), payload.begin(), payload.end());
     out->insert(out->end(), auth_tag.begin(), auth_tag.end());
     return OkStatus();

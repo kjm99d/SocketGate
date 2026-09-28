@@ -78,7 +78,7 @@ Status ComputeEnrollmentProof(const crypto::Sha256Digest& k_tok, const crypto::S
 Status DeriveChannelKeys(ByteView km, const SessionId& session_id, uint32_t epoch, crypto::AeadKey* c2s,
                          crypto::AeadKey* s2c)
 {
-    if (c2s == nullptr || s2c == nullptr || km.size() < 32) return SG_INVALID_ARGUMENT;
+    if (c2s == nullptr || s2c == nullptr || km.size() != 32) return SG_INVALID_ARGUMENT;
     uint8_t epoch_be[4];
     ser::StoreBE32(epoch_be, epoch);
 

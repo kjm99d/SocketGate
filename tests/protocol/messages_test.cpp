@@ -174,11 +174,15 @@ SG_TEST(Messages, ServerHelloAndProof)
     SG_EXPECT(sh2.challenge == sh.challenge);
     ExpectTruncationAndTrailingRejected<ServerHello>(wire, &DecodeServerHello, "ServerHello");
 
+    // A zero challenge TTL is refused by the encoder and by the decoder.
     ServerHello zero_ttl = sh;
     zero_ttl.challenge_ttl_ms = 0;
     Bytes w2;
-    SG_ASSERT_OK(EncodeServerHello(zero_ttl, &w2));
-    SG_EXPECT_STATUS(DecodeServerHello(w2, &sh2), SG_PROTOCOL_ERROR);
+    SG_EXPECT_STATUS(EncodeServerHello(zero_ttl, &w2), SG_INVALID_ARGUMENT);
+    SG_EXPECT(w2.empty());
+    Bytes zero_ttl_wire = wire;
+    for (size_t i = 2 + 64; i < 2 + 64 + 4; ++i) zero_ttl_wire[i] = 0;
+    SG_EXPECT_STATUS(DecodeServerHello(zero_ttl_wire, &sh2), SG_PROTOCOL_ERROR);
 
     ClientProof cp;
     cp.signature.fill(9);
@@ -225,19 +229,24 @@ SG_TEST(Messages, AuthResultRules)
     SG_ASSERT_OK(DecodeAuthResult(rw, &out));
     SG_EXPECT(out.result == AuthResultCode::kRejected);
 
-    // A rejection must not leak policy/feature data.
+    // A rejection must not leak policy/feature data: refused by the encoder
+    // and by the decoder.
     AuthResult leaky = rejected;
     leaky.granted_features = 1;
     Bytes lw;
-    SG_ASSERT_OK(EncodeAuthResult(leaky, &lw));
-    SG_EXPECT_STATUS(DecodeAuthResult(lw, &out), SG_PROTOCOL_ERROR);
+    SG_EXPECT_STATUS(EncodeAuthResult(leaky, &lw), SG_INVALID_ARGUMENT);
+    Bytes leaky_wire = rw;
+    leaky_wire[2 + 7] = 1;  // granted_features low byte
+    SG_EXPECT_STATUS(DecodeAuthResult(leaky_wire, &out), SG_PROTOCOL_ERROR);
 
     // OK requires a policy and a lifetime.
     AuthResult no_lifetime = ok;
     no_lifetime.session_lifetime_ms = 0;
     Bytes nw;
-    SG_ASSERT_OK(EncodeAuthResult(no_lifetime, &nw));
-    SG_EXPECT_STATUS(DecodeAuthResult(nw, &out), SG_PROTOCOL_ERROR);
+    SG_EXPECT_STATUS(EncodeAuthResult(no_lifetime, &nw), SG_INVALID_ARGUMENT);
+    Bytes zero_lifetime = wire;
+    for (size_t i = 10; i < 14; ++i) zero_lifetime[i] = 0;
+    SG_EXPECT_STATUS(DecodeAuthResult(zero_lifetime, &out), SG_PROTOCOL_ERROR);
 
     // Unknown enum values.
     Bytes unknown = wire;
@@ -251,6 +260,44 @@ SG_TEST(Messages, AuthResultRules)
     inconsistent.has_server_signature = false;
     Bytes iw;
     SG_EXPECT_STATUS(EncodeAuthResult(inconsistent, &iw), SG_INVALID_ARGUMENT);
+}
+
+SG_TEST(Messages, EncodersRefuseInvalidMessages)
+{
+    Bytes out;
+    ClientHello enroll_without_token;
+    enroll_without_token.auth_mode = AuthMode::kEnroll;
+    SG_EXPECT_STATUS(EncodeClientHello(enroll_without_token, &out), SG_INVALID_ARGUMENT);
+    ClientHello bad_versions;
+    bad_versions.version_min = 3;
+    bad_versions.version_max = 2;
+    SG_EXPECT_STATUS(EncodeClientHello(bad_versions, &out), SG_INVALID_ARGUMENT);
+    ClientHello bad_key;
+    bad_key.has_public_key = true;  // AUTHENTICATE mode may not carry a key
+    SG_EXPECT_STATUS(EncodeClientHello(bad_key, &out), SG_INVALID_ARGUMENT);
+    IntegrityReport no_platform;
+    SG_EXPECT_STATUS(EncodeIntegrityReport(no_platform, &out), SG_INVALID_ARGUMENT);
+    IntegrityReport unknown_flags;
+    unknown_flags.platform = 1;
+    unknown_flags.observation_flags = 0x80000000u;
+    SG_EXPECT_STATUS(EncodeIntegrityReport(unknown_flags, &out), SG_INVALID_ARGUMENT);
+    ReauthResult unsupported;
+    unsupported.result = AuthResultCode::kUnsupportedVersion;
+    SG_EXPECT_STATUS(EncodeReauthResult(unsupported, &out), SG_INVALID_ARGUMENT);
+    SG_EXPECT(out.empty());
+
+    // Frame encoder refuses headers the decoder would reject.
+    FrameHeader bad_flags;
+    bad_flags.type = MessageType::kData;
+    bad_flags.flags = 0x8000;
+    SG_EXPECT_STATUS(EncodeFrame(bad_flags, ByteView(), ByteView(), &out), SG_INVALID_ARGUMENT);
+    FrameHeader bad_type;
+    bad_type.type = static_cast<MessageType>(0x77);
+    SG_EXPECT_STATUS(EncodeFrame(bad_type, ByteView(), ByteView(), &out), SG_INVALID_ARGUMENT);
+    FrameHeader bad_version;
+    bad_version.version = 9;
+    SG_EXPECT_STATUS(EncodeFrame(bad_version, ByteView(), ByteView(), &out), SG_INVALID_ARGUMENT);
+    SG_EXPECT(out.empty());
 }
 
 SG_TEST(Messages, ControlMessages)
@@ -277,9 +324,8 @@ SG_TEST(Messages, ControlMessages)
     ReauthResult rr2;
     SG_ASSERT_OK(DecodeReauthResult(rrw, &rr2));
     SG_EXPECT_EQ(rr2.new_epoch, 1u);
-    rr.result = AuthResultCode::kUnsupportedVersion;
-    Bytes uv;
-    SG_ASSERT_OK(EncodeReauthResult(rr, &uv));
+    Bytes uv = rrw;
+    uv[0] = static_cast<uint8_t>(AuthResultCode::kUnsupportedVersion);
     SG_EXPECT_STATUS(DecodeReauthResult(uv, &rr2), SG_PROTOCOL_ERROR);
 
     Bytes cw;
@@ -336,6 +382,9 @@ SG_TEST(Rules, PhaseAndDirectionTable)
     SG_EXPECT(!check(MessageType::kReauthRequest, Role::kClient, Phase::kActive, tag).ok());
     SG_EXPECT_OK(check(MessageType::kReauthProof, Role::kServer, Phase::kRefreshing, tag));
     SG_EXPECT_OK(check(MessageType::kReauthResult, Role::kClient, Phase::kRefreshing, tag));
+    // No request id before authentication.
+    SG_EXPECT(!check(MessageType::kClientHello, Role::kServer, Phase::kAwaitClientHello, 0, 0, 0, 7).ok());
+    SG_EXPECT(!check(MessageType::kAuthResult, Role::kClient, Phase::kAwaitServerHello, 0, 0, 0, 7).ok());
     // CLOSE is always accepted with the matching auth length; nothing in kClosed.
     SG_EXPECT_OK(check(MessageType::kClose, Role::kClient, Phase::kAwaitAuthResult, 0));
     SG_EXPECT_OK(check(MessageType::kClose, Role::kClient, Phase::kActive, tag));

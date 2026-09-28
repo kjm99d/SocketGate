@@ -48,6 +48,10 @@ Status Base64UrlDecode(const std::string& text, SecureBytes* out)
     if (out == nullptr) return SG_INVALID_ARGUMENT;
     if (text.size() % 4 == 1) return SG_INVALID_ARGUMENT;  // impossible length
     uint32_t acc = 0;
+    struct Wipe {
+        uint32_t* p;
+        ~Wipe() { SecureZero(p, sizeof(*p)); }
+    } wipe{&acc};
     int bits = 0;
     for (char c : text) {
         const int v = DecodeChar(c);
@@ -61,7 +65,6 @@ Status Base64UrlDecode(const std::string& text, SecureBytes* out)
     }
     // Leftover bits must be zero (canonical encoding).
     if (bits > 0 && (acc & ((1u << bits) - 1)) != 0) return SG_INVALID_ARGUMENT;
-    SecureZero(&acc, sizeof(acc));
     return OkStatus();
 }
 

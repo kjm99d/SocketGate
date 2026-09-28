@@ -32,7 +32,14 @@ void EncodeHeader(const FrameHeader& header, uint8_t out[kHeaderSize]) noexcept;
 // SG_VERSION_MISMATCH. `in` must hold at least kHeaderSize bytes.
 Status DecodeHeader(ByteView in, FrameHeader* out);
 
+// Upper bound for buffered-but-unparsed input (one maximal frame plus slack).
+constexpr size_t kMaxDecoderBuffer = kHeaderSize + kAbsoluteMaxPayload + kAuthTagSize + 256 * 1024;
+// Buffer bound before authentication: a well-behaved peer sends a single
+// handshake frame and waits, so a few KiB of slack is plenty.
+constexpr size_t kPreAuthDecoderBuffer = 16 * 1024;
+
 // A complete frame as received: the exact wire bytes plus views into them.
+// The storage is wiped on destruction (it may hold decrypted plaintext).
 class DecodedFrame {
 public:
     const FrameHeader& header() const noexcept { return header_; }
@@ -50,16 +57,21 @@ public:
 private:
     friend class FrameDecoder;
     FrameHeader header_;
-    Bytes wire_;
+    SecureBytes wire_;
 };
 
 class FrameDecoder {
 public:
     // Invoked for every header before its body is buffered. Must return OK to
-    // continue; any other status is terminal for the decoder.
+    // continue; any other status is terminal for the decoder. A decoder
+    // without a check fails closed (every call returns SG_INVALID_ARGUMENT).
     using HeaderCheck = std::function<Status(const FrameHeader&)>;
 
     explicit FrameDecoder(HeaderCheck check);
+
+    // Caps the amount of buffered, unparsed input (clamped to
+    // kMaxDecoderBuffer). Sessions lower it before authentication.
+    void SetMaxBuffered(size_t max_bytes) noexcept;
 
     // Appends received bytes. Fails if the decoder already failed or the
     // amount of buffered, unparsed data exceeds the absolute bound.
@@ -76,8 +88,9 @@ private:
     Status Fail(Status s);
 
     HeaderCheck check_;
-    Bytes buffer_;
+    SecureBytes buffer_;
     size_t consumed_ = 0;
+    size_t max_buffered_ = kMaxDecoderBuffer;
     bool have_header_ = false;
     FrameHeader pending_;
     Status failure_ = OkStatus();

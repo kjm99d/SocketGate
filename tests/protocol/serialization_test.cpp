@@ -209,4 +209,11 @@ SG_TEST(Serialization, ProtocolStringValidation)
     SG_EXPECT(!ok("\xf4\x90\x80\x80"));             // > U+10FFFF
     SG_EXPECT(!ok("\xe2\x82"));                     // truncated
     SG_EXPECT(!ok("\x80"));                         // stray continuation
+    SG_EXPECT(!ok("admin\xe2\x80\xae"));             // U+202E right-to-left override
+    SG_EXPECT(!ok("a\xe2\x80\x8b"));                 // U+200B zero-width space
+    SG_EXPECT(!ok("a\xe2\x81\xa6"));                 // U+2066 left-to-right isolate
+    SG_EXPECT(!ok("\xef\xbb\xbf" "a"));              // U+FEFF BOM
+    SG_EXPECT(!ok("\xef\xbf\xbe"));                  // U+FFFE noncharacter
+    SG_EXPECT(!ok("\xef\xb7\x90"));                  // U+FDD0 noncharacter
+    SG_EXPECT(!ok("\xc2\xad"));                       // soft hyphen
 }

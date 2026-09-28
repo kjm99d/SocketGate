@@ -1,5 +1,7 @@
 #include "sockgate_common/protocol/messages.h"
 
+#include <sockgate/types.h>
+
 #include "sockgate_common/serialization/reader.h"
 #include "sockgate_common/serialization/tlv.h"
 #include "sockgate_common/serialization/writer.h"
@@ -46,19 +48,36 @@ Status SkipExtensions(Reader& r)
     return tlv.Parse(r);
 }
 
+// Encoders validate their own output with the matching decoder, so the
+// library can never emit a message its peer is required to reject.
+// On failure the output is truncated back to its original size.
+template <class T>
+Status SelfCheck(Status (*decode)(ByteView, T*), Bytes* out, size_t start)
+{
+    T check;
+    if (!decode(ByteView(out->data() + start, out->size() - start), &check).ok()) {
+        out->resize(start);
+        return SG_INVALID_ARGUMENT;
+    }
+    return OkStatus();
+}
+
 }  // namespace
 
 // ---- IntegrityReport ----------------------------------------------------------
 
 Status EncodeIntegrityReport(const IntegrityReport& in, Bytes* out)
 {
+    if (in.build_id.size() > kMaxBuildIdLength) return SG_INVALID_ARGUMENT;  // before writing anything
+    const size_t start = out->size();
     Writer w(out);
     w.U8(1);  // report_version
     w.U8(in.platform);
     w.U32(in.observation_flags);
     w.Raw(in.executable_sha256);
     w.Raw(in.library_sha256);
-    return w.Vec16(in.build_id, kMaxBuildIdLength);
+    SG_TRY(w.Vec16(in.build_id, kMaxBuildIdLength));
+    return SelfCheck<IntegrityReport>(&DecodeIntegrityReport, out, start);
 }
 
 Status DecodeIntegrityReport(ByteView in, IntegrityReport* out)
@@ -70,6 +89,7 @@ Status DecodeIntegrityReport(ByteView in, IntegrityReport* out)
     SG_TRY(r.U8(&out->platform));
     if (out->platform < 1 || out->platform > 3) return SG_PROTOCOL_ERROR;
     SG_TRY(r.U32(&out->observation_flags));
+    if ((out->observation_flags & ~SG_INTEGRITY_KNOWN_FLAGS) != 0) return SG_PROTOCOL_ERROR;
     SG_TRY(r.Fixed(&out->executable_sha256));
     SG_TRY(r.Fixed(&out->library_sha256));
     ByteView build_id;
@@ -85,6 +105,7 @@ Status EncodeClientHello(const ClientHello& in, Bytes* out)
     SG_TRY(CheckString(in.product_id, kMaxProductIdLength));
     SG_TRY(CheckString(in.product_version, kMaxProductVersionLength));
     SG_TRY(CheckString(in.license_id, kMaxLicenseIdLength));
+    const size_t start = out->size();
     Writer w(out);
     w.U16(in.version_min);
     w.U16(in.version_max);
@@ -111,7 +132,8 @@ Status EncodeClientHello(const ClientHello& in, Bytes* out)
         tlv.Add(tlv::kEnrollmentTokenId, in.enrollment_token_id);
     }
     if (in.has_public_key) tlv.Add(tlv::kPublicKey, in.public_key);
-    return tlv.Finish(w);
+    SG_TRY(tlv.Finish(w));
+    return SelfCheck<ClientHello>(&DecodeClientHello, out, start);
 }
 
 Status DecodeClientHello(ByteView in, ClientHello* out)
@@ -190,13 +212,15 @@ Status DecodeClientHello(ByteView in, ClientHello* out)
 
 Status EncodeServerHello(const ServerHello& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer w(out);
     w.U16(in.selected_version);
     w.Raw(in.server_nonce);
     w.Raw(in.challenge);
     w.U32(in.challenge_ttl_ms);
     w.U8(in.server_proof_algorithm);
-    return TlvWriter().Finish(w);
+    SG_TRY(TlvWriter().Finish(w));
+    return SelfCheck<ServerHello>(&DecodeServerHello, out, start);
 }
 
 Status DecodeServerHello(ByteView in, ServerHello* out)
@@ -218,12 +242,14 @@ Status DecodeServerHello(ByteView in, ServerHello* out)
 
 Status EncodeClientProof(const ClientProof& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer w(out);
     w.U8(in.signature_algorithm);
     SG_TRY(w.Vec16(in.signature));
     TlvWriter tlv;
     if (in.has_enrollment_proof) tlv.Add(tlv::kEnrollmentProof, in.enrollment_proof);
-    return tlv.Finish(w);
+    SG_TRY(tlv.Finish(w));
+    return SelfCheck<ClientProof>(&DecodeClientProof, out, start);
 }
 
 Status DecodeClientProof(ByteView in, ClientProof* out)
@@ -251,6 +277,13 @@ Status EncodeAuthResult(const AuthResult& in, Bytes* out)
     if (in.has_server_signature != (in.server_proof_algorithm == kProofAlgorithmEcdsaP256Sha256)) {
         return SG_INVALID_ARGUMENT;
     }
+    // A rejection must never carry session data (no information leak).
+    if (in.result != AuthResultCode::kOk &&
+        (in.policy != SessionPolicy::kNone || in.granted_features != 0 || in.session_lifetime_ms != 0 ||
+         in.license_expires_at_ms != 0 || in.server_proof_algorithm != kProofAlgorithmNone)) {
+        return SG_INVALID_ARGUMENT;
+    }
+    const size_t start = out->size();
     Writer w(out);
     w.U8(static_cast<uint8_t>(in.result));
     w.U8(static_cast<uint8_t>(in.policy));
@@ -258,9 +291,12 @@ Status EncodeAuthResult(const AuthResult& in, Bytes* out)
     w.U32(in.session_lifetime_ms);
     w.U64(in.license_expires_at_ms);
     w.U8(in.server_proof_algorithm);
-    if (in.has_server_signature) return w.Vec16(in.server_signature);
-    w.U16(0);
-    return OkStatus();
+    if (in.has_server_signature) {
+        SG_TRY(w.Vec16(in.server_signature));
+    } else {
+        w.U16(0);
+    }
+    return SelfCheck<AuthResult>(&DecodeAuthResult, out, start);
 }
 
 Status DecodeAuthResult(ByteView in, AuthResult* out)
@@ -334,11 +370,12 @@ Status DecodeReauthRequest(ByteView in, ReauthRequest* out)
 
 Status EncodeReauthChallenge(const ReauthChallenge& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer w(out);
     w.Raw(in.server_nonce);
     w.Raw(in.challenge);
     w.U32(in.challenge_ttl_ms);
-    return OkStatus();
+    return SelfCheck<ReauthChallenge>(&DecodeReauthChallenge, out, start);
 }
 
 Status DecodeReauthChallenge(ByteView in, ReauthChallenge* out)
@@ -353,9 +390,11 @@ Status DecodeReauthChallenge(ByteView in, ReauthChallenge* out)
 
 Status EncodeReauthProof(const ReauthProof& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer w(out);
     w.U8(in.signature_algorithm);
-    return w.Vec16(in.signature);
+    SG_TRY(w.Vec16(in.signature));
+    return SelfCheck<ReauthProof>(&DecodeReauthProof, out, start);
 }
 
 Status DecodeReauthProof(ByteView in, ReauthProof* out)
@@ -369,11 +408,12 @@ Status DecodeReauthProof(ByteView in, ReauthProof* out)
 
 Status EncodeReauthResult(const ReauthResult& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer w(out);
     w.U8(static_cast<uint8_t>(in.result));
     w.U32(in.session_lifetime_ms);
     w.U32(in.new_epoch);
-    return OkStatus();
+    return SelfCheck<ReauthResult>(&DecodeReauthResult, out, start);
 }
 
 Status DecodeReauthResult(ByteView in, ReauthResult* out)
@@ -399,8 +439,9 @@ Status DecodeReauthResult(ByteView in, ReauthResult* out)
 
 Status EncodeClose(const CloseMessage& in, Bytes* out)
 {
+    const size_t start = out->size();
     Writer(out).U16(static_cast<uint16_t>(in.reason));
-    return OkStatus();
+    return SelfCheck<CloseMessage>(&DecodeClose, out, start);
 }
 
 Status DecodeClose(ByteView in, CloseMessage* out)

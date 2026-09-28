@@ -67,7 +67,7 @@ Status CheckHeaderForState(const FrameHeader& h, Role receiver, Phase phase, con
     if (h.auth_length != (authenticated ? kAuthTagSize : 0)) return SG_PROTOCOL_ERROR;
 
     if (!authenticated) {
-        if (h.flags != 0) return SG_PROTOCOL_ERROR;
+        if (h.flags != 0 || h.request_id != 0) return SG_PROTOCOL_ERROR;
     } else {
         if ((h.flags & kFlagResponse) != 0 && h.type != MessageType::kData) return SG_PROTOCOL_ERROR;
         if ((h.flags & kFlagResponse) != 0 && h.request_id == 0) return SG_PROTOCOL_ERROR;
