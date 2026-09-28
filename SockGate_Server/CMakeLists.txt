@@ -4,14 +4,18 @@
 #   sockgate_server       public library exposing only the C ABI
 
 set(SG_SERVER_CORE_SOURCES
+    src/auth/server_handshake.cpp
+    src/storage/client_registry.cpp
 )
 
 if(SOCKGATE_PLATFORM STREQUAL "windows")
     list(APPEND SG_SERVER_CORE_SOURCES
+        src/platform/windows/atomic_file_win.cpp
         src/platform/windows/iocp_io_service.cpp
     )
 else()
     list(APPEND SG_SERVER_CORE_SOURCES
+        src/platform/linux/atomic_file_posix.cpp
         src/platform/linux/epoll_io_service.cpp
     )
 endif()

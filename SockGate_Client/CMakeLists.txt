@@ -4,6 +4,8 @@
 #   sockgate_client       public library exposing only the C ABI
 
 set(SG_CLIENT_CORE_SOURCES
+    src/auth/client_handshake.cpp
+    src/crypto/key_store.cpp
     src/tls/tls_channel.cpp
     src/transport/tcp_transport.cpp
 )
