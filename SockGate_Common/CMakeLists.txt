@@ -5,6 +5,7 @@ set(SG_COMMON_SOURCES
     src/sockgate_common/core/bytes.cpp
     src/sockgate_common/core/log.cpp
     src/sockgate_common/crypto/openssl_crypto.cpp
+    src/sockgate_common/protocol/channel.cpp
     src/sockgate_common/protocol/enrollment_token.cpp
     src/sockgate_common/protocol/frame.cpp
     src/sockgate_common/protocol/messages.cpp
