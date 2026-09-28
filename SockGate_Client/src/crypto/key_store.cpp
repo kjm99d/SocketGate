@@ -19,15 +19,41 @@ const char* KeyStoreKindName(KeyStoreKind kind) noexcept
     return "unknown";
 }
 
+namespace {
+
+// CON, PRN, AUX, NUL, COM0-9, LPT0-9 (any case, with or without extension)
+// open devices on Windows.
+bool IsWindowsDeviceName(const std::string& name)
+{
+    std::string stem = name.substr(0, name.find('.'));
+    for (char& c : stem) c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+    if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") return true;
+    return stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0) && stem[3] >= '0' &&
+           stem[3] <= '9';
+}
+
+}  // namespace
+
 Status ValidateKeyName(const std::string& name)
 {
     if (name.empty() || name.size() > 128) return SG_INVALID_ARGUMENT;
-    if (name == "." || name == "..") return SG_INVALID_ARGUMENT;
+    if (name == "." || name == ".." || name.front() == '.') return SG_INVALID_ARGUMENT;
     for (char c : name) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
                         c == '_' || c == '-';
         if (!ok) return SG_INVALID_ARGUMENT;
     }
+    if (IsWindowsDeviceName(name)) return SG_INVALID_ARGUMENT;
+    return OkStatus();
+}
+
+Status IKeyStore::Describe(const std::string& name, crypto::P256PublicKey* public_key, KeyStoreKind* kind,
+                           bool* hardware_backed)
+{
+    if (public_key == nullptr || kind == nullptr || hardware_backed == nullptr) return SG_INVALID_ARGUMENT;
+    SG_TRY(GetPublicKey(name, public_key));
+    *kind = Kind();
+    *hardware_backed = HardwareBacked();
     return OkStatus();
 }
 
@@ -35,11 +61,9 @@ Status GetIdentity(IKeyStore& store, const std::string& name, IdentityInfo* out)
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;
     SG_TRY(ValidateKeyName(name));
-    SG_TRY(store.GetPublicKey(name, &out->public_key));
+    SG_TRY(store.Describe(name, &out->public_key, &out->kind, &out->hardware_backed));
     SG_TRY(crypto::ValidateP256PublicKey(out->public_key));
     SG_TRY(proto::DeriveInstallationId(out->public_key, &out->installation_id));
-    out->kind = store.Kind();
-    out->hardware_backed = store.HardwareBacked();
     out->created = false;
     return OkStatus();
 }

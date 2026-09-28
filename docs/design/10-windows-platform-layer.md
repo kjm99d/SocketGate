@@ -48,21 +48,37 @@ Worker thread × N: GetQueuedCompletionStatusEx → IoOperation* → 핸들러
 | 항목 | 구현 |
 |---|---|
 | Provider | TPM: `MS_PLATFORM_CRYPTO_PROVIDER`, Software: `MS_KEY_STORAGE_PROVIDER` |
-| 키 | `NCRYPT_ECDSA_P256_ALGORITHM`, 영속 키 (이름: `SockGate/<identity_name>`) |
-| export 정책 | `NCRYPT_EXPORT_POLICY_PROPERTY = 0` (non-exportable) |
-| 범위 | 기본 사용자 범위. `SG_KEYSTORE_FLAG_MACHINE` 이면 `NCRYPT_MACHINE_KEY_FLAG` |
-| 서명 | SHA-256 (BCrypt) → `NCryptSignHash` → P1363 64 bytes |
-| 공개키 | `NCryptExportKey(BCRYPT_ECCPUBLIC_BLOB)` → SEC1 `0x04‖X‖Y` 변환 |
+| 키 | `BCRYPT_ECDSA_P256_ALGORITHM`, 영속 키 (이름: `SockGate-<identity_name>`), 용도 `NCRYPT_ALLOW_SIGNING_FLAG` |
+| export 정책 | Software KSP: `NCRYPT_EXPORT_POLICY_PROPERTY = 0` (non-exportable). TPM: 키가 칩 밖으로 나오지 않음 |
+| 범위 | 사용자 범위 (machine key 미지원) |
+| UI | 생성·열기·서명에 `NCRYPT_SILENT_FLAG` (UI 금지). 삭제는 PCP 가 이 플래그를 거부하므로 0 |
+| 서명 | SHA-256 (OpenSSL) → `NCryptSignHash` → P1363 64 bytes |
+| 공개키 | `NCryptExportKey(BCRYPT_ECCPUBLIC_BLOB)` → SEC1 `0x04‖X‖Y` 변환 후 곡선 위 검증 |
 | 메타데이터 | 없음. installation_id 는 공개키에서 유도 (06 §2.1) |
 | 삭제 | `NCryptDeleteKey` |
-| AUTO | TPM provider 열기 성공 + 키 생성 성공 시 TPM, 아니면 Software KSP |
+| TPM 판정 | provider 를 열 수 있으면 store 생성. **새 키 생성**: `Tbsi_GetDeviceInfo` 가 TPM 2.0 → 허용, TPM 1.2 / `TBS_E_TPM_NOT_FOUND` / `TBS_E_SERVICE_DISABLED` → `SG_NOT_SUPPORTED`, 그 밖(서비스 시작 중 등) → `SG_KEYSTORE_ERROR` 이며 다음 생성 시 다시 묻는다. 생성 실패는 `NTE_NOT_SUPPORTED`/`NTE_BAD_ALGID` 와 TPM 2.0 `ASYMMETRIC`/`HASH`/`HIERARCHY`/`KEY_SIZE`/`SCHEME`/`CURVE` 만 `SG_NOT_SUPPORTED` |
+| 오류 | `NTE_BAD_KEYSET`/`NTE_NO_KEY` 만 "키 없음". 그 밖의 오류는 `SG_KEYSTORE_ERROR` — TPM 이 일시적으로 안 될 때 AUTO 가 더 약한 저장소에 새 identity 를 만들지 않게 한다 |
+| AUTO | TPM(PCP) → Software KSP 순으로 조회. 새 키는 생성 가능한 첫 저장소에 만든다 |
 
 Software KSP 의 키는 Windows 가 DPAPI 로 보호하는 사용자 프로필 영역에 저장된다.
 
 ### 2.2 DPAPI
 
 - File key store 를 Windows 에서 사용할 경우 PKCS#8 private key 를 `CryptProtectData`(사용자 범위,
-  `CRYPTPROTECT_UI_FORBIDDEN`, entropy = identity 이름 기반 도메인 분리 문자열)로 암호화해 저장한다.
+  `CRYPTPROTECT_UI_FORBIDDEN`, entropy = `"SockGate/v1/file-key/" ‖ identity 이름`)로 암호화해 저장한다.
+  entropy 가 이름을 묶으므로 다른 이름의 키 파일로 바꿔치기할 수 없다.
+- 위치: `key_store_path` 또는 `%LOCALAPPDATA%\SockGate\keys`. SockGate 가 만드는 디렉터리에는 보호된 DACL
+  (`D:P(A;OICI;FA;;;<user SID>)(A;OICI;FA;;;SY)`)을 설정해 부모 ACL 상속을 끊는다.
+- 디렉터리는 **모든 작업마다** 다시 검증한다: reparse point 가 아니고, 소유자가 사용자/SYSTEM/Administrators 이며,
+  DACL(상속 전용 ACE 포함)이 그 외 주체에게 쓰기/삭제/권한 변경을 허용하지 않아야 한다. NULL DACL, 평가하지
+  않는 허용 ACE 종류(조건부/object ACE) 거부. FAT 등 ACL 없는 볼륨은 거부된다 (fail closed).
+- 읽은 파일의 소유자도 사용자/SYSTEM/Administrators 여야 한다 (다른 계정이 심은 파일 거부).
+- 읽기는 공유 모드 READ|DELETE 로 연다 (방금 게시된 파일의 rename 핸들과 충돌하지 않도록). 백신 검사 등으로
+  생기는 일시적 sharing violation 은 최대 250 ms 재시도한다.
+- 파일: 임시 파일(`CREATE_NEW`, write-through) → `MoveFileExW`(덮어쓰기 없음) 로 배타적·원자적 생성.
+  읽기/삭제는 `FILE_FLAG_OPEN_REPARSE_POINT` 로 열고 reparse point, 디렉터리, hard link(링크 수 ≠ 1)를 거부한다.
+  삭제는 0 으로 덮어쓴 뒤 delete-on-close.
+- 파일 형식과 무결성 검사는 06 §3.1 참고.
 - DPAPI 는 같은 사용자 권한으로 실행되는 코드로부터 키를 보호하지 못한다 (제한사항).
 
 ### 2.3 인증서 저장소

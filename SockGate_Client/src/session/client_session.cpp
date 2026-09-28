@@ -62,14 +62,15 @@ Status ClientSession::GetIdentity(IdentityInfo* out)
     return sg::client::GetIdentity(*settings_.key_store, settings_.identity_name, out);
 }
 
-Status ClientSession::DeleteIdentity()
+Status ClientSession::DeleteIdentity(bool force)
 {
     std::lock_guard<std::mutex> control(control_mutex_);
     const uint32_t s = state_.load();
     if (s != SG_CLIENT_STATE_DISCONNECTED && s != SG_CLIENT_STATE_CLOSED && s != SG_CLIENT_STATE_EXPIRED) {
         return SG_INVALID_STATE;
     }
-    return settings_.key_store->DeleteKey(settings_.identity_name);
+    return force ? settings_.key_store->ForceDeleteKey(settings_.identity_name)
+                 : settings_.key_store->DeleteKey(settings_.identity_name);
 }
 
 // ---- generations ----------------------------------------------------------------------

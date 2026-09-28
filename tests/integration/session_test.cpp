@@ -398,6 +398,57 @@ SG_TEST(Session, RevocationClosesLiveSession)
     SG_EXPECT_STATUS(SG_Client_Authenticate(client.get()), SG_SERVER_REJECTED);
 }
 
+SG_TEST(Session, PersistentFileIdentity)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-e2e-keys-" + std::to_string(sg::MonotonicMs()));
+    const std::string key_dir = dir.u8string();
+    auto new_file_client = [&]() {
+        SG_ClientConfig cfg;
+        SG_ClientConfig_Init(&cfg);
+        cfg.identity_name = "e2e-file-identity";
+        cfg.key_store_type = SG_KEYSTORE_FILE;
+        cfg.key_store_path = key_dir.c_str();
+        cfg.product_id = "e2e-product";
+        cfg.io_timeout_ms = 10000;
+        SG_Client* c = nullptr;
+        SG_ASSERT_OK(SG_Client_Create(&cfg, &c));
+        return ClientPtr(c);
+    };
+
+    TestServer server;
+    server.Start();
+    SG_IdentityInfo first;
+    SG_IdentityInfo_Init(&first);
+    {
+        ClientPtr client = new_file_client();
+        SG_ASSERT_OK(SG_Client_EnsureIdentity(client.get(), &first));
+        SG_EXPECT_EQ(first.key_store_type, uint32_t{SG_KEYSTORE_FILE});
+        SG_EXPECT_EQ(first.hardware_backed, uint32_t{0});
+        SG_ClientRecord rec;
+        SG_ClientRecord_Init(&rec);
+        rec.public_key = first.public_key;
+        SG_ASSERT_OK(SG_Server_RegisterClient(server.server, &rec));
+        ConnectAndAuth(client.get(), server.port);
+    }
+    {
+        // A new client object (as after an application restart) is the same installation.
+        ClientPtr client = new_file_client();
+        SG_IdentityInfo again;
+        SG_IdentityInfo_Init(&again);
+        SG_ASSERT_OK(SG_Client_GetIdentity(client.get(), &again));
+        SG_EXPECT(std::memcmp(again.installation_id.bytes, first.installation_id.bytes, sizeof(first.installation_id.bytes)) == 0);
+        ConnectAndAuth(client.get(), server.port);
+        SG_ASSERT_OK(SG_Client_Disconnect(client.get()));
+        SG_ASSERT_OK(SG_Client_DeleteIdentity(client.get()));
+        SG_EXPECT_STATUS(SG_Client_GetIdentity(client.get(), &again), SG_NOT_FOUND);
+        SG_EXPECT_STATUS(SG_Client_DeleteIdentityEx(client.get(), 0x80), SG_INVALID_ARGUMENT);
+        SG_EXPECT_STATUS(SG_Client_DeleteIdentityEx(client.get(), SG_IDENTITY_DELETE_FORCE), SG_NOT_FOUND);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 SG_TEST(Session, RevocationTakesEffectWhenStorageFails)
 {
     namespace fs = std::filesystem;

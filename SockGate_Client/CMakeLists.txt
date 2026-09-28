@@ -5,6 +5,8 @@
 
 set(SG_CLIENT_CORE_SOURCES
     src/auth/client_handshake.cpp
+    src/crypto/auto_key_store.cpp
+    src/crypto/file_key_store.cpp
     src/crypto/key_store.cpp
     src/crypto/key_store_factory.cpp
     src/session/client_session.cpp
@@ -16,12 +18,22 @@ set(SG_CLIENT_CORE_SOURCES
 
 if(SOCKGATE_PLATFORM STREQUAL "windows")
     list(APPEND SG_CLIENT_CORE_SOURCES
+        src/platform/windows/cng_key_store.cpp
+        src/platform/windows/key_file_win.cpp
         src/platform/windows/system_proxy_win.cpp
     )
 else()
     list(APPEND SG_CLIENT_CORE_SOURCES
+        src/platform/linux/key_file_posix.cpp
         src/platform/linux/system_proxy_linux.cpp
     )
+endif()
+
+if(SOCKGATE_WITH_TPM2)
+    if(NOT SOCKGATE_PLATFORM STREQUAL "linux")
+        message(FATAL_ERROR "SOCKGATE_WITH_TPM2 is only supported on Linux (Windows uses CNG)")
+    endif()
+    list(APPEND SG_CLIENT_CORE_SOURCES src/platform/linux/tpm2_key_store.cpp)
 endif()
 
 add_library(sockgate_client_core STATIC ${SG_CLIENT_CORE_SOURCES})
@@ -32,7 +44,20 @@ target_include_directories(sockgate_client_core
 )
 target_link_libraries(sockgate_client_core PUBLIC sockgate_common)
 if(SOCKGATE_PLATFORM STREQUAL "windows")
-    target_link_libraries(sockgate_client_core PUBLIC winhttp)  # system proxy settings (read-only)
+    target_link_libraries(sockgate_client_core PUBLIC
+        winhttp    # system proxy settings (read-only)
+        ncrypt     # CNG key stores
+        tbs        # TPM presence check
+        crypt32    # DPAPI
+        advapi32   # token / security descriptors
+        shell32    # known folders
+        ole32)     # CoTaskMemFree
+endif()
+if(SOCKGATE_WITH_TPM2)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(TSS2 REQUIRED IMPORTED_TARGET tss2-esys tss2-mu tss2-tctildr)
+    target_link_libraries(sockgate_client_core PUBLIC PkgConfig::TSS2)
+    target_compile_definitions(sockgate_client_core PUBLIC SOCKGATE_WITH_TPM2)
 endif()
 sockgate_configure_target(sockgate_client_core)
 

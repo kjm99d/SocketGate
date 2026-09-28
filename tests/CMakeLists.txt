@@ -49,6 +49,11 @@ sockgate_add_test(sg_integration_session
     SOURCES integration/session_test.cpp
     LIBS sg_test_support sockgate_client sockgate_server sockgate_client_core)
 
+sockgate_add_test(sg_security_keystore
+    LABEL security
+    SOURCES security/key_store_test.cpp
+    LIBS sockgate_client_core)
+
 sockgate_add_test(sg_security_license
     LABEL security
     SOURCES security/license_test.cpp

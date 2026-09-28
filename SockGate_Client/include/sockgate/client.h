@@ -68,6 +68,16 @@ SG_CLIENT_API SG_Status SG_CALL SG_Client_EnsureIdentity(SG_Client* client, SG_I
 SG_CLIENT_API SG_Status SG_CALL SG_Client_GetIdentity(SG_Client* client, SG_IdentityInfo* info);
 SG_CLIENT_API SG_Status SG_CALL SG_Client_DeleteIdentity(SG_Client* client);
 
+/* SG_KEYSTORE_AUTO remembers which store holds an identity. If that store is
+ * unavailable (e.g. the TPM provider cannot be opened) identity calls fail
+ * with SG_KEYSTORE_ERROR, and if it lost the key (e.g. TPM cleared) with
+ * SG_IDENTITY_LOST - never by silently creating a new identity. Deleting an
+ * identity whose store is unavailable is refused unless forced; a forced
+ * delete may leave the key behind in that store. A new identity must be
+ * registered / enrolled again. */
+#define SG_IDENTITY_DELETE_FORCE (1u << 0)
+SG_CLIENT_API SG_Status SG_CALL SG_Client_DeleteIdentityEx(SG_Client* client, uint32_t flags);
+
 /* Connection and authentication. */
 SG_CLIENT_API SG_Status SG_CALL SG_Client_Connect(SG_Client* client, const SG_ServerConfig* server);
 SG_CLIENT_API SG_Status SG_CALL SG_Client_Authenticate(SG_Client* client);

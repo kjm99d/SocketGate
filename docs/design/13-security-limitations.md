@@ -41,9 +41,9 @@ SockGate 의 목표는 **네트워크 proxy / MITM 만으로 정상 인증 세�
 | 저장소 | 한계 |
 |---|---|
 | File (Linux) | 같은 사용자/root 가 읽을 수 있음. 파일 권한에만 의존 |
-| File (Windows, DPAPI) | 같은 사용자 권한 코드가 복호화 가능 |
+| File (Windows, DPAPI) | 같은 사용자 권한 코드가 복호화 가능. DPAPI envelope 의 일부 헤더 바이트는 MAC 범위 밖이라 변조해도 거부되지 않지만 키는 바뀌지 않는다 (pairwise 검사) |
 | CNG Software KSP | non-exportable 이지만 같은 사용자 권한으로 서명 요청 가능. 관리자는 키 추출 도구로 추출 가능 |
-| CNG TPM / TPM2 | 키 추출은 불가하나 서명 오라클 가능. TPM 펌웨어 취약점은 범위 밖 |
+| CNG TPM / TPM2 | 키 추출은 불가하나 서명 오라클 가능. TPM 펌웨어 취약점은 범위 밖. Linux TPM2 키는 owner auth 가 비어 있는 owner hierarchy 를 가정 (owner auth 가 설정된 시스템은 생성 실패 → AUTO 는 File). TPM2 명령은 salted HMAC 세션 없이 보내므로 TPM 버스에 물리적으로 접근한 공격자의 명령 변조는 범위 밖. `hardware_backed` 는 클라이언트가 보고하는 값이며 attestation 이 아니다. Linux 에서 TPM 드라이버가 로드되기 전(부팅 초기)에 처음 만든 identity 는 File 저장소에 만들어진다 |
 | 삭제 | SSD wear-leveling, 저널링 FS, 백업으로 인해 파일 기반 키의 완전 삭제 보장 불가 |
 
 ## 5. 서버

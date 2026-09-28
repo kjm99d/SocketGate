@@ -41,7 +41,8 @@ enum SG_StatusCode {
     SG_VERSION_MISMATCH     = 25,
     SG_CRYPTO_ERROR         = 26,
     SG_INTERNAL_ERROR       = 27,
-    SG_STORAGE_ERROR        = 28
+    SG_STORAGE_ERROR        = 28,
+    SG_IDENTITY_LOST        = 29  /* the key store that held the identity no longer has its key */
 };
 
 /* Returns a static, human readable name for a status code. Never NULL. */
@@ -77,6 +78,7 @@ static inline const char* SG_StatusString(SG_Status status)
     case SG_CRYPTO_ERROR:      return "SG_CRYPTO_ERROR";
     case SG_INTERNAL_ERROR:    return "SG_INTERNAL_ERROR";
     case SG_STORAGE_ERROR:     return "SG_STORAGE_ERROR";
+    case SG_IDENTITY_LOST:     return "SG_IDENTITY_LOST";
     default:                   return "SG_UNKNOWN_STATUS";
     }
 }

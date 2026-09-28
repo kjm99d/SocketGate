@@ -62,6 +62,7 @@
 | 26 | `SG_CRYPTO_ERROR` | 암호 |
 | 27 | `SG_INTERNAL_ERROR` | 내부 |
 | 28 | `SG_STORAGE_ERROR` | 서버 저장소 |
+| 29 | `SG_IDENTITY_LOST` | identity 를 보관하던 key store 에 키가 더 이상 없음 (예: TPM clear). 삭제 후 재등록 필요 |
 
 값은 ABI 의 일부이며 변경하지 않는다. 새 코드는 끝에만 추가한다.
 

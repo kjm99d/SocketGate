@@ -79,7 +79,7 @@ public:
 
     Status EnsureIdentity(IdentityInfo* out);
     Status GetIdentity(IdentityInfo* out);
-    Status DeleteIdentity();
+    Status DeleteIdentity(bool force);
 
     Status Connect(const ServerTarget& target);
     // enrollment_token == nullptr: AUTHENTICATE, otherwise ENROLL.

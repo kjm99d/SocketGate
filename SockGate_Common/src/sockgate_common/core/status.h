@@ -36,7 +36,7 @@ inline constexpr Status OkStatus() noexcept { return Status(); }
 inline SG_Status ToPublicStatus(Status status) noexcept
 {
     const SG_Status code = status.code();
-    return (code >= SG_OK && code <= SG_STORAGE_ERROR) ? code : SG_INTERNAL_ERROR;
+    return (code >= SG_OK && code <= SG_IDENTITY_LOST) ? code : SG_INTERNAL_ERROR;
 }
 
 }  // namespace sg

@@ -293,7 +293,13 @@ SG_CLIENT_API SG_Status SG_CALL SG_Client_GetIdentity(SG_Client* client, SG_Iden
 SG_CLIENT_API SG_Status SG_CALL SG_Client_DeleteIdentity(SG_Client* client)
 {
     if (client == nullptr) return SG_INVALID_ARGUMENT;
-    return Guard([&]() { return client->session->DeleteIdentity(); });
+    return Guard([&]() { return client->session->DeleteIdentity(false); });
+}
+
+SG_CLIENT_API SG_Status SG_CALL SG_Client_DeleteIdentityEx(SG_Client* client, uint32_t flags)
+{
+    if (client == nullptr || (flags & ~SG_IDENTITY_DELETE_FORCE) != 0) return SG_INVALID_ARGUMENT;
+    return Guard([&]() { return client->session->DeleteIdentity((flags & SG_IDENTITY_DELETE_FORCE) != 0); });
 }
 
 SG_CLIENT_API SG_Status SG_CALL SG_Client_Connect(SG_Client* client, const SG_ServerConfig* server)
