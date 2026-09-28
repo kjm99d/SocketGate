@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "sockgate",
+  "version-semver": "0.1.0",
+  "description": "SockGate - embeddable authenticated secure transport gate",
+  "dependencies": [
+    {
+      "name": "openssl",
+      "platform": "windows"
+    }
+  ]
+}
