@@ -12,7 +12,7 @@
 
 #include <string>
 
-namespace sg::client::platform {
+namespace sg::client::os {
 
 constexpr size_t kMaxKeyFileSize = 64 * 1024;
 
@@ -41,4 +41,4 @@ Status ReadKeyFile(const std::string& dir, const std::string& file, SecureBytes*
 // Overwrites the content, then removes the file. SG_NOT_FOUND if absent.
 Status DeleteKeyFile(const std::string& dir, const std::string& file);
 
-}  // namespace sg::client::platform
+}  // namespace sg::client::os

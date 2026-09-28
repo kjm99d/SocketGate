@@ -19,7 +19,7 @@
 
 #include <vector>
 
-namespace sg::client::platform {
+namespace sg::client::os {
 namespace {
 
 class Fd {
@@ -316,4 +316,4 @@ Status DeleteKeyFile(const std::string& dir, const std::string& file)
     return OkStatus();
 }
 
-}  // namespace sg::client::platform
+}  // namespace sg::client::os

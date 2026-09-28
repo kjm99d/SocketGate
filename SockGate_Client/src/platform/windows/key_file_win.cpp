@@ -14,7 +14,7 @@
 #include <climits>
 #include <vector>
 
-namespace sg::client::platform {
+namespace sg::client::os {
 namespace {
 
 bool ToWide(const std::string& in, std::wstring* out)
@@ -404,4 +404,4 @@ Status DeleteKeyFile(const std::string& dir, const std::string& file)
     return OkStatus();
 }
 
-}  // namespace sg::client::platform
+}  // namespace sg::client::os

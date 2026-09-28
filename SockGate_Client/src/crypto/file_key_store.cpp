@@ -48,19 +48,19 @@ public:
         crypto::P256PublicKey public_key;
         SG_TRY(key->PublicKey(&public_key));
         Bytes protected_blob;
-        SG_TRY(platform::ProtectKeyBlob(pkcs8, Context(name), &protected_blob));
+        SG_TRY(os::ProtectKeyBlob(pkcs8, Context(name), &protected_blob));
 
         Bytes file;
         ser::Writer w(&file);
         w.U32(kKeyFileMagic);
         w.U16(kKeyFileVersion);
-        w.U8(static_cast<uint8_t>(platform::PlatformBlobProtection()));
+        w.U8(static_cast<uint8_t>(os::PlatformBlobProtection()));
         w.U8(0);
         w.Raw(public_key);
         w.U32(static_cast<uint32_t>(protected_blob.size()));
         w.Raw(protected_blob);
         SecureZero(protected_blob.data(), protected_blob.size());
-        const Status st = platform::CreateKeyFile(dir_, FileName(name), file);
+        const Status st = os::CreateKeyFile(dir_, FileName(name), file);
         SecureZero(file.data(), file.size());
         return st;
     }
@@ -84,7 +84,7 @@ public:
     Status DeleteKey(const std::string& name) override
     {
         SG_TRY(ValidateKeyName(name));
-        return platform::DeleteKeyFile(dir_, FileName(name));
+        return os::DeleteKeyFile(dir_, FileName(name));
     }
 
 private:
@@ -94,7 +94,7 @@ private:
     {
         SG_TRY(ValidateKeyName(name));
         SecureBytes data;
-        SG_TRY(platform::ReadKeyFile(dir_, FileName(name), &data));
+        SG_TRY(os::ReadKeyFile(dir_, FileName(name), &data));
         ser::Reader r(data);
         uint32_t magic = 0;
         uint16_t version = 0;
@@ -104,14 +104,14 @@ private:
         crypto::P256PublicKey stored_public{};
         ByteView blob;
         if (!r.U32(&magic).ok() || magic != kKeyFileMagic || !r.U16(&version).ok() || version != kKeyFileVersion ||
-            !r.U8(&protection).ok() || protection != static_cast<uint8_t>(platform::PlatformBlobProtection()) ||
+            !r.U8(&protection).ok() || protection != static_cast<uint8_t>(os::PlatformBlobProtection()) ||
             !r.U8(&reserved).ok() || reserved != 0 || !r.Fixed(&stored_public).ok() || !r.U32(&length).ok() ||
             !r.View(length, &blob).ok() || !r.ExpectEnd().ok()) {
             SecureZero(data.data(), data.size());
             return SG_KEYSTORE_ERROR;
         }
         SecureBytes pkcs8;
-        const Status unwrapped = platform::UnprotectKeyBlob(blob, Context(name), &pkcs8);
+        const Status unwrapped = os::UnprotectKeyBlob(blob, Context(name), &pkcs8);
         SecureZero(data.data(), data.size());
         SG_TRY(unwrapped);
         // The private scalar must match the stored public key (pairwise check
@@ -139,8 +139,8 @@ Status CreateFileKeyStore(const std::string& directory, std::unique_ptr<IKeyStor
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;
     std::string dir = directory;
-    if (dir.empty()) SG_TRY(platform::DefaultKeyDirectory(&dir));
-    SG_TRY(platform::PrepareKeyDirectory(dir));
+    if (dir.empty()) SG_TRY(os::DefaultKeyDirectory(&dir));
+    SG_TRY(os::PrepareKeyDirectory(dir));
     *out = std::make_unique<FileKeyStore>(std::move(dir));
     return OkStatus();
 }

@@ -181,7 +181,7 @@ public:
         Esys_Free(out_private);
         Esys_Free(out_public);
         SG_TRY(st);
-        return platform::CreateKeyFile(dir_, FileName(name), file);
+        return os::CreateKeyFile(dir_, FileName(name), file);
     }
 
     Status GetPublicKey(const std::string& name, crypto::P256PublicKey* out) override
@@ -250,7 +250,7 @@ public:
     Status DeleteKey(const std::string& name) override
     {
         SG_TRY(ValidateKeyName(name));
-        return platform::DeleteKeyFile(dir_, FileName(name));
+        return os::DeleteKeyFile(dir_, FileName(name));
     }
 
 private:
@@ -334,7 +334,7 @@ private:
     {
         SG_TRY(ValidateKeyName(name));
         SecureBytes data;
-        SG_TRY(platform::ReadKeyFile(dir_, FileName(name), &data));
+        SG_TRY(os::ReadKeyFile(dir_, FileName(name), &data));
         ser::Reader r(data);
         uint32_t magic = 0;
         uint16_t version = 0;
@@ -373,8 +373,8 @@ Status CreateTpm2KeyStore(const std::string& directory, std::unique_ptr<IKeyStor
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;
     std::string dir = directory;
-    if (dir.empty()) SG_TRY(platform::DefaultKeyDirectory(&dir));
-    SG_TRY(platform::PrepareKeyDirectory(dir));
+    if (dir.empty()) SG_TRY(os::DefaultKeyDirectory(&dir));
+    SG_TRY(os::PrepareKeyDirectory(dir));
     // Only the kernel resource manager (or an explicit TCTI) is used; the raw
     // /dev/tpm0 is exclusive and not shared with other TPM users.
     std::string tcti;

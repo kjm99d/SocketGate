@@ -87,7 +87,7 @@ public:
         if (store == nullptr) return SG_KEYSTORE_ERROR;  // cannot reach its key: refuse, see ForceDeleteKey
         const Status st = store->DeleteKey(name);
         if (!st.ok() && st != SG_NOT_FOUND) return st;
-        return platform::DeleteKeyFile(dir_, LocatorFile(name));
+        return os::DeleteKeyFile(dir_, LocatorFile(name));
     }
 
     // Forgets the identity even if its store is unavailable or failing: the
@@ -96,7 +96,7 @@ public:
     {
         SG_TRY(ValidateKeyName(name));
         const Status keys = DeleteFromStores(name, /*tolerate_errors=*/true);
-        const Status locator = platform::DeleteKeyFile(dir_, LocatorFile(name));
+        const Status locator = os::DeleteKeyFile(dir_, LocatorFile(name));
         if (!locator.ok() && locator != SG_NOT_FOUND) return locator;
         return locator.ok() ? OkStatus() : keys;
     }
@@ -169,7 +169,7 @@ private:
     Status ReadLocator(const std::string& name, KeyStoreKind* kind)
     {
         SecureBytes data;
-        SG_TRY(platform::ReadKeyFile(dir_, LocatorFile(name), &data));
+        SG_TRY(os::ReadKeyFile(dir_, LocatorFile(name), &data));
         ser::Reader r(data);
         uint32_t magic = 0;
         uint16_t version = 0;
@@ -192,7 +192,7 @@ private:
         w.U16(kLocatorVersion);
         w.U8(static_cast<uint8_t>(kind));
         w.U8(0);
-        const Status st = platform::CreateKeyFile(dir_, LocatorFile(name), data);
+        const Status st = os::CreateKeyFile(dir_, LocatorFile(name), data);
         if (st != SG_ALREADY_EXISTS) return st;
         // A concurrent creator recorded it first: it must name the same store.
         KeyStoreKind recorded = KeyStoreKind::kMemory;
@@ -214,8 +214,8 @@ Status CreateAutoKeyStore(std::vector<std::unique_ptr<IKeyStore>> stores, const 
         if (store == nullptr || store->Kind() == KeyStoreKind::kMemory) return SG_INVALID_ARGUMENT;
     }
     std::string dir = locator_directory;
-    if (dir.empty()) SG_TRY(platform::DefaultKeyDirectory(&dir));
-    SG_TRY(platform::PrepareKeyDirectory(dir));
+    if (dir.empty()) SG_TRY(os::DefaultKeyDirectory(&dir));
+    SG_TRY(os::PrepareKeyDirectory(dir));
     *out = std::make_unique<AutoKeyStore>(std::move(stores), std::move(dir));
     return OkStatus();
 }
