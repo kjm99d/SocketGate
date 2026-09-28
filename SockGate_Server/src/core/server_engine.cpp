@@ -15,7 +15,6 @@ namespace {
 constexpr uint32_t kSweepIntervalMs = 250;
 constexpr uint64_t kGracefulCloseTimeoutMs = 5000;
 constexpr uint32_t kDefaultTokenTtlMs = 24u * 3600 * 1000;
-constexpr uint32_t kMaxTokenTtlMs = 30u * 24 * 3600 * 1000;
 
 thread_local bool t_in_callback = false;
 
@@ -394,7 +393,7 @@ Status ServerEngine::IssueEnrollmentToken(const std::string& product_id, const s
 {
     if (token == nullptr || product_id.empty()) return SG_INVALID_ARGUMENT;
     if (ttl_ms == 0) ttl_ms = kDefaultTokenTtlMs;
-    if (ttl_ms > kMaxTokenTtlMs) return SG_INVALID_ARGUMENT;
+    if (ttl_ms > proto::kMaxEnrollmentTokenLifetimeMs) return SG_INVALID_ARGUMENT;
     SG_TRY(CheckLicenseBinding(product_id, license_id));
     proto::EnrollmentClaims claims;
     SG_TRY(crypto::RandomArray(&claims.token_id));

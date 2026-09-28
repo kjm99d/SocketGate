@@ -757,3 +757,20 @@ SG_TEST(Registry, StorageFilesAreOwnerOnly)
     fs::remove_all(dir);
 }
 #endif
+
+SG_TEST(Enrollment, OverlongTokenLifetimeIsRejected)
+{
+    ServerSide server;
+    server.Init(EnrollConfig());
+    auto ks = CreateMemoryKeyStore();
+    SG_ASSERT_OK(ks->GenerateKeyPair("app"));
+    ClientHandshakeConfig ccfg;
+    ccfg.product_id = "prod";
+    // Signed with the server's own token key, but valid for 31 days.
+    const EnrollmentMaterial overlong =
+        MakeToken(server, "prod", proto::kMaxEnrollmentTokenLifetimeMs + 24ull * 3600 * 1000, 7);
+    SG_EXPECT_STATUS(RunSameSession(server, *ks, "app", ccfg, &overlong).client, SG_SERVER_REJECTED);
+    // The maximum itself is accepted.
+    const EnrollmentMaterial longest = MakeToken(server, "prod", proto::kMaxEnrollmentTokenLifetimeMs, 8);
+    SG_EXPECT_OK(RunSameSession(server, *ks, "app", ccfg, &longest).client);
+}

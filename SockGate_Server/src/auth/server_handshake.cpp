@@ -197,6 +197,10 @@ Status ServerHandshake::VerifyEnrollment(const proto::ClientProof& proof, const 
             failure_reason_ = "enrollment token issued in the future";
             return SG_AUTH_FAILED;
         }
+        if (claims.expires_at_ms - claims.issued_at_ms > proto::kMaxEnrollmentTokenLifetimeMs) {
+            failure_reason_ = "enrollment token lifetime exceeds the maximum";
+            return SG_AUTH_FAILED;
+        }
         if ((!hello_.product_id.empty() && hello_.product_id != claims.product_id) ||
             (!hello_.license_id.empty() && hello_.license_id != claims.license_id)) {
             failure_reason_ = "enrollment claims mismatch";

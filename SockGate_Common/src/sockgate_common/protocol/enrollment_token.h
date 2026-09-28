@@ -22,6 +22,11 @@ namespace sg::proto {
 
 using TokenId = std::array<uint8_t, kTokenIdSize>;
 
+// Longest validity a built-in enrollment token may have. Enforced when
+// issuing and again when the token is redeemed (a token minted elsewhere
+// with the server's key cannot outlive it).
+constexpr uint64_t kMaxEnrollmentTokenLifetimeMs = 30ull * 24 * 3600 * 1000;
+
 struct EnrollmentClaims {
     TokenId token_id{};
     std::string product_id;  // required, 1..64
