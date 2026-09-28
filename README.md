@@ -70,6 +70,8 @@ find_package(SockGate 0.1 REQUIRED)
 target_link_libraries(app PRIVATE SockGate::Client)   # or SockGate::Server
 ```
 
+API reference (all headers, Doxygen comments): `doxygen Doxyfile` from the repository root, or `cmake --build --preset <preset> --target docs` when CMake found Doxygen; the output is `out/doxygen/html/index.html`.
+
 ## Repository layout
 
 ```text

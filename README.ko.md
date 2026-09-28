@@ -66,6 +66,8 @@ find_package(SockGate 0.1 REQUIRED)
 target_link_libraries(app PRIVATE SockGate::Client)   # 또는 SockGate::Server
 ```
 
+API 레퍼런스(모든 헤더의 Doxygen 주석): 저장소 루트에서 `doxygen Doxyfile`, 또는 CMake 가 Doxygen 을 찾았다면 `cmake --build --preset <preset> --target docs`. 결과는 `out/doxygen/html/index.html` 이다.
+
 ## 저장소 구조
 
 ```text

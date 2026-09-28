@@ -68,6 +68,8 @@ find_package(SockGate 0.1 REQUIRED)
 target_link_libraries(app PRIVATE SockGate::Client)   # または SockGate::Server
 ```
 
+API リファレンス（全ヘッダーの Doxygen コメント）: リポジトリのルートで `doxygen Doxyfile`、または CMake が Doxygen を見つけた場合は `cmake --build --preset <preset> --target docs` を実行します。出力は `out/doxygen/html/index.html` です。
+
 ## リポジトリ構成
 
 ```text

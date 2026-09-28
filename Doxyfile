@@ -1,0 +1,41 @@
+# Doxygen configuration for the SockGate API and internal headers.
+#   doxygen Doxyfile            (from the repository root; output in out/doxygen/html)
+#   cmake --build <dir> --target docs   (when CMake found Doxygen)
+# Only settings that differ from Doxygen's defaults are listed.
+
+PROJECT_NAME           = SockGate
+PROJECT_NUMBER         = $(SOCKGATE_VERSION)
+PROJECT_BRIEF          = "Embeddable network authentication gate"
+OUTPUT_DIRECTORY       = out/doxygen
+STRIP_FROM_PATH        = .
+STRIP_FROM_INC_PATH    = SockGate_Common/include SockGate_Client/include SockGate_Server/include \
+                         SockGate_Common/src SockGate_Client/src SockGate_Server/src
+
+INPUT                  = docs/doxygen/mainpage.md \
+                         SockGate_Common/include SockGate_Client/include SockGate_Server/include \
+                         SockGate_Common/src SockGate_Client/src SockGate_Server/src
+FILE_PATTERNS          = *.h
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE = docs/doxygen/mainpage.md
+
+EXTRACT_STATIC         = YES
+SORT_MEMBER_DOCS       = NO
+INLINE_SOURCES         = NO
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+# _WIN32 and SOCKGATE_WITH_TPM2 guard independent blocks (CNG and TPM2 key stores): define both so
+# the platform-specific declarations are documented too.
+PREDEFINED             = SG_CALL= SG_CLIENT_API= SG_SERVER_API= SG_DECL_EXPORT= SG_DECL_IMPORT= \
+                         SG_EXTERN_C_BEGIN= SG_EXTERN_C_END= _WIN32 SOCKGATE_WITH_TPM2
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = YES
+WARN_LOGFILE           = out/doxygen/warnings.log
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_OUTPUT            = html

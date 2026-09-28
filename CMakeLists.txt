@@ -85,6 +85,16 @@ if(SOCKGATE_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists
     add_subdirectory(tools)
 endif()
 
+# API documentation (Doxyfile in the repository root; output in out/doxygen/html).
+find_package(Doxygen QUIET)
+if(DOXYGEN_FOUND AND PROJECT_IS_TOP_LEVEL)
+    add_custom_target(docs
+        COMMAND "${CMAKE_COMMAND}" -E env "SOCKGATE_VERSION=${PROJECT_VERSION}" "${DOXYGEN_EXECUTABLE}" Doxyfile
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        COMMENT "Generating the API documentation with Doxygen"
+        VERBATIM)
+endif()
+
 message(STATUS "SockGate ${PROJECT_VERSION} | platform=${SOCKGATE_PLATFORM} | shared=${SOCKGATE_BUILD_SHARED}"
                " | tests=${SOCKGATE_BUILD_TESTS} | fuzz=${SOCKGATE_BUILD_FUZZERS}"
                " | sanitizer='${SOCKGATE_SANITIZER}' | OpenSSL=${OPENSSL_VERSION}")
