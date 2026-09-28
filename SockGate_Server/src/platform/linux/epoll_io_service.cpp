@@ -4,13 +4,17 @@
 // processed by two workers at once, and are identified in epoll by a 64-bit
 // id (not a pointer) looked up in a registry; a stale event for a closed
 // stream therefore finds nothing instead of touching freed memory. All
-// syscalls on a stream's fd happen under the stream mutex, so a closed fd
-// number that the kernel reuses can never be read or written by mistake.
+// syscalls on a stream's fd happen under the stream mutex, and listener fds
+// are only used and closed under listeners_mutex_, so a closed fd number
+// that the kernel reuses can never be read, written or re-armed by mistake.
 #include "transport/io_service.h"
 
 #include "sockgate_common/platform/socket.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -21,8 +25,6 @@
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
-#include <atomic>
-#include <algorithm>
 
 namespace sg::server {
 namespace {
@@ -31,8 +33,24 @@ constexpr uint64_t kWakeTag = 0;
 constexpr uint64_t kListenerTag = 1ULL << 63;
 constexpr int kMaxEvents = 64;
 constexpr int kMaxAcceptsPerWake = 64;
+constexpr int kMaxDrainReadsPerEvent = 16;
 
 using Callback = std::function<void()>;
+
+void InvokeSafely(const Callback& cb) noexcept
+{
+    try {
+        cb();
+    } catch (...) {
+        // A throwing user handler must not skip the remaining callbacks.
+    }
+}
+
+void InvokeAll(std::vector<Callback>& callbacks) noexcept
+{
+    for (auto& cb : callbacks) InvokeSafely(cb);
+    callbacks.clear();
+}
 
 class EpollService;
 
@@ -75,7 +93,10 @@ private:
         WriteHandler handler;
     };
 
-    void UpdateInterestLocked(std::vector<Callback>* deferred);
+    // Returns false if re-arming failed (the caller decides how to fail).
+    bool UpdateInterestLocked();
+    void RearmOrCloseLocked(std::vector<Callback>* deferred);
+    void FinishGracefulLocked(std::vector<Callback>* deferred);
     void CloseLocked(std::vector<Callback>* deferred, Status reason);
     void FailWritesLocked(std::vector<Callback>* deferred, Status status);
 
@@ -88,6 +109,8 @@ private:
     mutable std::mutex mutex_;
     bool closed_ = false;
     bool close_after_writes_ = false;
+    bool send_shutdown_ = false;
+    bool draining_ = false;  // discard input until EOF after a half-close
 
     std::vector<uint8_t> read_buffer_;
     bool read_pending_ = false;
@@ -101,6 +124,11 @@ struct Listener {
     int fd = -1;
     uint64_t tag = 0;
     AcceptHandler on_accept;
+
+    ~Listener()
+    {
+        if (fd >= 0) ::close(fd);
+    }
 };
 
 class EpollService final : public IIoService {
@@ -130,26 +158,27 @@ public:
     {
         if (deferred.empty()) return;
         auto shared = std::make_shared<std::vector<Callback>>(std::move(deferred));
-        if (!Post([shared]() { for (auto& cb : *shared) cb(); }).ok()) {
-            for (auto& cb : *shared) cb();
-        }
+        if (!PostInternal([shared]() { InvokeAll(*shared); }).ok()) InvokeAll(*shared);
     }
 
 private:
+    Status PostInternal(std::function<void()> fn);
+    void SignalWakeLocked();
     void WorkerLoop();
     void OnWake();
-    void OnListenerEvent(Listener* listener);
+    void OnListenerEvent(uint64_t tag);
     void ArmWake();
-    void ArmListener(Listener* listener);
 
     platform::NetworkRuntime net_;
     IoServiceOptions options_;
     int epfd_ = -1;
-    int wake_fd_ = -1;
+    int wake_fd_ = -1;  // written only under post_mutex_
     std::vector<std::thread> workers_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<uint64_t> next_stream_id_{1};
+
+    std::mutex stop_mutex_;
 
     std::mutex post_mutex_;
     std::deque<std::function<void()>> tasks_;  // guarded by post_mutex_
@@ -177,23 +206,30 @@ Status EpollStream::Register(int epfd)
     epfd_ = epfd;
     epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLONESHOT | EPOLLRDHUP;  // not armed for I/O until a read/write is requested
+    ev.events = EPOLLONESHOT;  // not armed for I/O until a read/write is requested
     ev.data.u64 = id_;
     return ::epoll_ctl(epfd_, EPOLL_CTL_ADD, fd_, &ev) == 0 ? OkStatus() : Status(SG_NETWORK_ERROR);
 }
 
-void EpollStream::UpdateInterestLocked(std::vector<Callback>* deferred)
+bool EpollStream::UpdateInterestLocked()
 {
-    if (closed_) return;
-    uint32_t events = EPOLLONESHOT | EPOLLRDHUP;
-    if (read_pending_) events |= EPOLLIN;
+    if (closed_) return true;
+    uint32_t events = EPOLLONESHOT;
+    // EPOLLRDHUP is level-triggered once the peer's FIN arrived; requesting it
+    // while nobody reads would make every re-arm fire immediately (busy loop).
+    if (read_pending_ || draining_) events |= EPOLLIN | EPOLLRDHUP;
     if (!write_queue_.empty()) events |= EPOLLOUT;
-    if ((events & (EPOLLIN | EPOLLOUT)) == 0) return;
+    if ((events & (EPOLLIN | EPOLLOUT)) == 0) return true;
     epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events = events;
     ev.data.u64 = id_;
-    if (::epoll_ctl(epfd_, EPOLL_CTL_MOD, fd_, &ev) != 0) CloseLocked(deferred, SG_NETWORK_ERROR);
+    return ::epoll_ctl(epfd_, EPOLL_CTL_MOD, fd_, &ev) == 0;
+}
+
+void EpollStream::RearmOrCloseLocked(std::vector<Callback>* deferred)
+{
+    if (!UpdateInterestLocked()) CloseLocked(deferred, SG_NETWORK_ERROR);
 }
 
 Status EpollStream::AsyncRead(ReadHandler handler)
@@ -203,12 +239,17 @@ Status EpollStream::AsyncRead(ReadHandler handler)
     Status result = OkStatus();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (closed_) return SG_CLOSED;
+        if (closed_ || draining_) return SG_CLOSED;
         if (read_pending_) return SG_INVALID_STATE;
         read_handler_ = std::move(handler);
         read_pending_ = true;
-        UpdateInterestLocked(&deferred);
-        if (closed_) result = SG_NETWORK_ERROR;
+        if (!UpdateInterestLocked()) {
+            // Fail synchronously without invoking the handler.
+            read_pending_ = false;
+            read_handler_ = nullptr;
+            CloseLocked(&deferred, SG_NETWORK_ERROR);
+            result = SG_NETWORK_ERROR;
+        }
     }
     service_->RunDeferred(std::move(deferred));
     return result;
@@ -223,7 +264,7 @@ Status EpollStream::AsyncWrite(std::vector<uint8_t> data, WriteHandler handler)
         if (closed_ || close_after_writes_) return SG_CLOSED;
         pending_write_bytes_ += data.size();
         write_queue_.push_back(PendingWrite{std::move(data), 0, std::move(handler)});
-        if (write_queue_.size() == 1) UpdateInterestLocked(&deferred);
+        if (write_queue_.size() == 1) RearmOrCloseLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
     return OkStatus();
@@ -233,21 +274,34 @@ void EpollStream::OnEvent(uint32_t events)
 {
     std::vector<Callback> deferred;
     std::shared_ptr<EpollStream> self = shared_from_this();
+    bool delivered_read = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return;
 
         const bool error = (events & EPOLLERR) != 0;
+        const bool readable = (events & (EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR)) != 0;
 
-        if (read_pending_ && (events & (EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR)) != 0) {
+        if (draining_ && readable) {
+            for (int i = 0; i < kMaxDrainReadsPerEvent && !closed_; ++i) {
+                ssize_t n;
+                do {
+                    n = ::recv(fd_, read_buffer_.data(), read_buffer_.size(), 0);
+                } while (n < 0 && errno == EINTR);
+                if (n > 0) continue;  // discard
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+                CloseLocked(&deferred, SG_CLOSED);  // EOF or error ends the graceful close
+            }
+        } else if (read_pending_ && readable) {
             ssize_t n;
             do {
                 n = ::recv(fd_, read_buffer_.data(), read_buffer_.size(), 0);
             } while (n < 0 && errno == EINTR);
-            if (n > 0 || n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 ReadHandler h = std::move(read_handler_);
                 read_handler_ = nullptr;
                 read_pending_ = false;
+                delivered_read = true;
                 if (n > 0) {
                     const size_t size = static_cast<size_t>(n);
                     uint8_t* data = read_buffer_.data();
@@ -259,7 +313,7 @@ void EpollStream::OnEvent(uint32_t events)
             }
         }
 
-        if (!write_queue_.empty() && (events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0) {
+        if (!closed_ && !write_queue_.empty() && (events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0) {
             while (!write_queue_.empty()) {
                 PendingWrite& front = write_queue_.front();
                 ssize_t n;
@@ -272,7 +326,7 @@ void EpollStream::OnEvent(uint32_t events)
                     break;
                 }
                 front.offset += static_cast<size_t>(n);
-                pending_write_bytes_ -= static_cast<size_t>(n);
+                pending_write_bytes_ -= std::min(pending_write_bytes_, static_cast<size_t>(n));
                 if (front.offset == front.data.size()) {
                     if (front.handler) {
                         WriteHandler h = std::move(front.handler);
@@ -283,12 +337,37 @@ void EpollStream::OnEvent(uint32_t events)
             }
         }
 
-        if (!closed_ && error && !read_pending_ && write_queue_.empty()) CloseLocked(&deferred, SG_NETWORK_ERROR);
-        if (!closed_ && close_after_writes_ && write_queue_.empty()) CloseLocked(&deferred, SG_CLOSED);
-        UpdateInterestLocked(&deferred);
+        if (!closed_ && error && !read_pending_ && !draining_ && write_queue_.empty()) {
+            CloseLocked(&deferred, SG_NETWORK_ERROR);
+        }
+        if (!closed_ && close_after_writes_ && write_queue_.empty()) FinishGracefulLocked(&deferred);
+        RearmOrCloseLocked(&deferred);
     }
     // Event-driven callbacks run inline on this worker thread.
-    for (auto& cb : deferred) cb();
+    InvokeAll(deferred);
+
+    if (delivered_read) {
+        // After a half-close, keep draining once the owner stops reading.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!closed_ && send_shutdown_ && !read_pending_ && !draining_) {
+            draining_ = true;
+            RearmOrCloseLocked(&deferred);
+        }
+    }
+    InvokeAll(deferred);
+}
+
+void EpollStream::FinishGracefulLocked(std::vector<Callback>* deferred)
+{
+    if (closed_ || send_shutdown_) return;
+    send_shutdown_ = true;
+    // Half-close so the peer gets FIN after the queued bytes; closing with
+    // unread input would send RST and could destroy data still in flight.
+    ::shutdown(fd_, SHUT_WR);
+    if (!read_pending_) {
+        draining_ = true;
+        RearmOrCloseLocked(deferred);
+    }
 }
 
 void EpollStream::CloseAfterWrites() noexcept
@@ -298,7 +377,7 @@ void EpollStream::CloseAfterWrites() noexcept
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return;
         close_after_writes_ = true;
-        if (write_queue_.empty()) CloseLocked(&deferred, SG_CLOSED);
+        if (write_queue_.empty()) FinishGracefulLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
 }
@@ -330,19 +409,20 @@ void EpollStream::CloseLocked(std::vector<Callback>* deferred, Status reason)
 {
     if (closed_) return;
     closed_ = true;
+    draining_ = false;
     if (fd_ >= 0) {
         if (epfd_ >= 0) ::epoll_ctl(epfd_, EPOLL_CTL_DEL, fd_, nullptr);
         ::close(fd_);
         fd_ = -1;
     }
+    const Status failure = reason.ok() ? Status(SG_CLOSED) : reason;
     if (read_pending_) {
         ReadHandler h = std::move(read_handler_);
         read_handler_ = nullptr;
         read_pending_ = false;
-        const Status st = reason.ok() ? Status(SG_CLOSED) : reason;
-        deferred->push_back([h = std::move(h), st]() { h(st, nullptr, 0); });
+        deferred->push_back([h = std::move(h), failure]() { h(failure, nullptr, 0); });
     }
-    FailWritesLocked(deferred, reason.ok() ? Status(SG_CLOSED) : reason);
+    FailWritesLocked(deferred, failure);
     const uint64_t id = id_;
     EpollService* service = service_;
     deferred->push_back([service, id]() { service->Unregister(id); });
@@ -353,6 +433,7 @@ void EpollStream::CloseLocked(std::vector<Callback>* deferred, Status reason)
 
 Status EpollService::Start(const IoServiceOptions& options)
 {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
     if (running_.load()) return SG_INVALID_STATE;
     options_ = options;
     if (options_.read_buffer_size < 1024) options_.read_buffer_size = 1024;
@@ -362,8 +443,8 @@ Status EpollService::Start(const IoServiceOptions& options)
 
     epfd_ = ::epoll_create1(EPOLL_CLOEXEC);
     if (epfd_ < 0) return SG_NETWORK_ERROR;
-    wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (wake_fd_ < 0) {
+    const int wake = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (wake < 0) {
         ::close(epfd_);
         epfd_ = -1;
         return SG_NETWORK_ERROR;
@@ -372,26 +453,50 @@ Status EpollService::Start(const IoServiceOptions& options)
     std::memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.u64 = kWakeTag;
-    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, wake_fd_, &ev) != 0) {
-        ::close(wake_fd_);
+    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, wake, &ev) != 0) {
+        ::close(wake);
         ::close(epfd_);
-        wake_fd_ = epfd_ = -1;
+        epfd_ = -1;
         return SG_NETWORK_ERROR;
     }
 
     stopping_ = false;
     {
         std::lock_guard<std::mutex> lock(post_mutex_);
+        wake_fd_ = wake;
         quitting_ = false;
+        tasks_.clear();
     }
     running_ = true;
     try {
         for (uint32_t i = 0; i < threads; ++i) workers_.emplace_back([this]() { WorkerLoop(); });
     } catch (...) {
-        Stop();
+        {
+            std::lock_guard<std::mutex> lock(post_mutex_);
+            quitting_ = true;
+            SignalWakeLocked();
+        }
+        for (auto& w : workers_) w.join();
+        workers_.clear();
+        std::lock_guard<std::mutex> lock(post_mutex_);
+        ::close(wake_fd_);
+        wake_fd_ = -1;
+        ::close(epfd_);
+        epfd_ = -1;
+        running_ = false;
         return SG_OUT_OF_MEMORY;
     }
     return OkStatus();
+}
+
+void EpollService::SignalWakeLocked()
+{
+    if (wake_fd_ < 0) return;
+    const uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = ::write(wake_fd_, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
 }
 
 void EpollService::ArmWake()
@@ -401,15 +506,6 @@ void EpollService::ArmWake()
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.u64 = kWakeTag;
     ::epoll_ctl(epfd_, EPOLL_CTL_MOD, wake_fd_, &ev);
-}
-
-void EpollService::ArmListener(Listener* listener)
-{
-    epoll_event ev;
-    std::memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN | EPOLLONESHOT;
-    ev.data.u64 = listener->tag;
-    ::epoll_ctl(epfd_, EPOLL_CTL_MOD, listener->fd, &ev);
 }
 
 Status EpollService::Listen(const std::string& bind_address, uint16_t port, AcceptHandler on_accept,
@@ -424,100 +520,112 @@ Status EpollService::Listen(const std::string& bind_address, uint16_t port, Acce
     SG_TRY(platform::CreateListener(addresses.front(), options_.listen_backlog, true, &native));
 
     auto listener = std::make_unique<Listener>();
-    listener->fd = static_cast<int>(native);
+    listener->fd = static_cast<int>(native);  // closed by ~Listener on any failure below
     listener->on_accept = std::move(on_accept);
 
     if (bound_port != nullptr) {
         platform::SocketAddress local;
-        if (!platform::GetLocalAddress(native, &local).ok()) {
-            ::close(listener->fd);
-            return SG_NETWORK_ERROR;
-        }
+        SG_TRY(platform::GetLocalAddress(native, &local));
         *bound_port = local.Port();
     }
 
     std::lock_guard<std::mutex> lock(listeners_mutex_);
+    if (stopping_.load()) return SG_INVALID_STATE;
     listener->tag = kListenerTag | static_cast<uint64_t>(listeners_.size());
     epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.u64 = listener->tag;
-    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, listener->fd, &ev) != 0) {
-        ::close(listener->fd);
-        return SG_NETWORK_ERROR;
-    }
+    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, listener->fd, &ev) != 0) return SG_NETWORK_ERROR;
     listeners_.push_back(std::move(listener));
     return OkStatus();
 }
 
-void EpollService::OnListenerEvent(Listener* listener)
+void EpollService::OnListenerEvent(uint64_t tag)
 {
     std::vector<std::shared_ptr<EpollStream>> accepted;
-    bool exhausted = false;
-    for (int i = 0; i < kMaxAcceptsPerWake && !stopping_.load(); ++i) {
-        sockaddr_storage peer_addr;
-        socklen_t peer_len = sizeof(peer_addr);
-        const int fd = ::accept4(listener->fd, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len,
-                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (fd < 0) {
-            if (errno == EINTR || errno == ECONNABORTED) continue;
-            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) exhausted = true;
-            break;  // EAGAIN or a persistent error
-        }
-        platform::SocketAddress sa;
-        const size_t copy = std::min<size_t>(peer_len, sizeof(sa.storage));
-        std::memcpy(sa.storage, &peer_addr, copy);
-        sa.length = static_cast<uint32_t>(copy);
-        platform::SetTcpNoDelay(fd, true).IgnoreError();
+    AcceptHandler on_accept;
+    {
+        std::lock_guard<std::mutex> lock(listeners_mutex_);
+        const size_t index = static_cast<size_t>(tag & ~kListenerTag);
+        if (index >= listeners_.size()) return;
+        Listener* listener = listeners_[index].get();
+        if (listener->fd < 0 || stopping_.load()) return;
 
-        std::shared_ptr<EpollStream> stream;
-        try {
-            stream = std::make_shared<EpollStream>(this, fd, next_stream_id_.fetch_add(1), sa.ToString(),
-                                                   options_.read_buffer_size);
-        } catch (...) {
-            ::close(fd);
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> lock(streams_mutex_);
-            streams_[stream->Id()] = stream;
-        }
-        if (!stream->Register(epfd_).ok()) {
-            stream->Close();
-            continue;
-        }
-        accepted.push_back(std::move(stream));
-    }
+        bool exhausted = false;
+        for (int i = 0; i < kMaxAcceptsPerWake; ++i) {
+            sockaddr_storage peer_addr;
+            socklen_t peer_len = sizeof(peer_addr);
+            const int fd = ::accept4(listener->fd, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len,
+                                     SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (fd < 0) {
+                if (errno == EINTR || errno == ECONNABORTED) continue;
+                if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) exhausted = true;
+                break;  // EAGAIN or a persistent error
+            }
+            platform::SocketAddress sa;
+            const size_t copy = std::min<size_t>(peer_len, sizeof(sa.storage));
+            std::memcpy(sa.storage, &peer_addr, copy);
+            sa.length = static_cast<uint32_t>(copy);
+            platform::SetTcpNoDelay(fd, true).IgnoreError();
 
-    if (exhausted) {
-        // Descriptor exhaustion: back off briefly instead of spinning on a
-        // permanently readable listener.
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::shared_ptr<EpollStream> stream;
+            try {
+                stream = std::make_shared<EpollStream>(this, fd, next_stream_id_.fetch_add(1), sa.ToString(),
+                                                       options_.read_buffer_size);
+            } catch (...) {
+                ::close(fd);
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> streams_lock(streams_mutex_);
+                streams_[stream->Id()] = stream;
+            }
+            if (!stream->Register(epfd_).ok()) {
+                stream->Close();
+                continue;
+            }
+            accepted.push_back(std::move(stream));
+        }
+
+        if (exhausted) {
+            // Descriptor exhaustion: back off briefly instead of spinning on a
+            // permanently readable listener.
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        epoll_event ev;
+        std::memset(&ev, 0, sizeof(ev));
+        ev.events = EPOLLIN | EPOLLONESHOT;
+        ev.data.u64 = listener->tag;
+        ::epoll_ctl(epfd_, EPOLL_CTL_MOD, listener->fd, &ev);
+        on_accept = listener->on_accept;
     }
-    if (!stopping_.load()) ArmListener(listener);
 
     for (auto& stream : accepted) {
         if (stopping_.load()) {
             stream->Close();
         } else {
-            listener->on_accept(stream);
+            InvokeSafely([&]() { on_accept(stream); });
         }
     }
 }
 
 Status EpollService::Post(std::function<void()> fn)
 {
+    // External work is refused once shutdown begins (see the IOCP version).
+    if (stopping_.load()) return SG_CLOSED;
+    return PostInternal(std::move(fn));
+}
+
+Status EpollService::PostInternal(std::function<void()> fn)
+{
     if (!fn) return SG_INVALID_ARGUMENT;
-    {
-        std::lock_guard<std::mutex> lock(post_mutex_);
-        if (!running_.load() || quitting_) return SG_CLOSED;
-        tasks_.push_back(std::move(fn));
-    }
-    const uint64_t one = 1;
-    ssize_t n;
-    do {
-        n = ::write(wake_fd_, &one, sizeof(one));
-    } while (n < 0 && errno == EINTR);
+    std::lock_guard<std::mutex> lock(post_mutex_);
+    if (!running_.load() || quitting_) return SG_CLOSED;
+    tasks_.push_back(std::move(fn));
+    // Written under the lock: Stop() closes wake_fd_ under the same lock, so
+    // this can never write into a closed (and possibly reused) descriptor.
+    SignalWakeLocked();
     return OkStatus();
 }
 
@@ -534,12 +642,10 @@ void EpollService::OnWake()
         std::lock_guard<std::mutex> lock(post_mutex_);
         batch.swap(tasks_);
     }
-    for (auto& task : batch) {
-        try {
-            task();
-        } catch (...) {
-        }
-    }
+    // Re-arm before running the batch so tasks posted meanwhile run on other
+    // workers in parallel (a task may wait for another task to complete).
+    ArmWake();
+    for (auto& task : batch) InvokeSafely(task);
 }
 
 void EpollService::WorkerLoop()
@@ -555,30 +661,14 @@ void EpollService::WorkerLoop()
             const uint64_t tag = events[i].data.u64;
             if (tag == kWakeTag) {
                 OnWake();
-                bool quit;
-                {
-                    std::lock_guard<std::mutex> lock(post_mutex_);
-                    quit = quitting_ && tasks_.empty();
-                }
-                if (quit) {
+                std::lock_guard<std::mutex> lock(post_mutex_);
+                if (quitting_ && tasks_.empty()) {
                     // Chain the wake-up so every other worker also observes the quit.
-                    const uint64_t one = 1;
-                    ssize_t w;
-                    do {
-                        w = ::write(wake_fd_, &one, sizeof(one));
-                    } while (w < 0 && errno == EINTR);
-                    ArmWake();
+                    SignalWakeLocked();
                     return;
                 }
-                ArmWake();
             } else if ((tag & kListenerTag) != 0) {
-                Listener* listener = nullptr;
-                {
-                    std::lock_guard<std::mutex> lock(listeners_mutex_);
-                    const size_t index = static_cast<size_t>(tag & ~kListenerTag);
-                    if (index < listeners_.size()) listener = listeners_[index].get();
-                }
-                if (listener != nullptr && listener->fd >= 0) OnListenerEvent(listener);
+                OnListenerEvent(tag);
             } else {
                 std::shared_ptr<EpollStream> stream;
                 {
@@ -594,6 +684,7 @@ void EpollService::WorkerLoop()
 
 void EpollService::Stop() noexcept
 {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
     if (!running_.load()) return;
     const std::thread::id self = std::this_thread::get_id();
     for (const auto& w : workers_) {
@@ -625,13 +716,8 @@ void EpollService::Stop() noexcept
     {
         std::lock_guard<std::mutex> lock(post_mutex_);
         quitting_ = true;
+        SignalWakeLocked();
     }
-    const uint64_t one = 1;
-    ssize_t w;
-    do {
-        w = ::write(wake_fd_, &one, sizeof(one));
-    } while (w < 0 && errno == EINTR);
-
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();
     }
@@ -643,12 +729,7 @@ void EpollService::Stop() noexcept
         std::lock_guard<std::mutex> lock(post_mutex_);
         leftovers.swap(tasks_);
     }
-    for (auto& task : leftovers) {
-        try {
-            task();
-        } catch (...) {
-        }
-    }
+    for (auto& task : leftovers) InvokeSafely(task);
 
     {
         std::lock_guard<std::mutex> lock(listeners_mutex_);
@@ -658,13 +739,13 @@ void EpollService::Stop() noexcept
         std::lock_guard<std::mutex> lock(streams_mutex_);
         streams_.clear();
     }
-    ::close(wake_fd_);
-    ::close(epfd_);
-    wake_fd_ = epfd_ = -1;
     {
         std::lock_guard<std::mutex> lock(post_mutex_);
+        ::close(wake_fd_);
+        wake_fd_ = -1;
+        ::close(epfd_);
+        epfd_ = -1;
         running_ = false;
-        quitting_ = false;
     }
 }
 

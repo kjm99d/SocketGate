@@ -184,20 +184,33 @@ Status WaitSocket(NativeSocket socket, WaitFor what, uint32_t timeout_ms, bool* 
     *ready = false;
     // select() is used instead of WSAPoll: it reliably reports failed
     // non-blocking connects through the exception set on all Windows 10 builds.
+    // The exception set is only consulted for connects: for reads/writes it
+    // would also signal out-of-band data and make every wait return at once.
     fd_set primary;
     fd_set except;
     FD_ZERO(&primary);
     FD_ZERO(&except);
     FD_SET(ToSocket(socket), &primary);
-    FD_SET(ToSocket(socket), &except);
     timeval tv;
     tv.tv_sec = static_cast<long>(timeout_ms / 1000);
     tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
-    const int rc = what == WaitFor::kRead ? select(0, &primary, nullptr, &except, &tv)
-                                          : select(0, nullptr, &primary, &except, &tv);
+    int rc;
+    switch (what) {
+    case WaitFor::kRead:
+        rc = select(0, &primary, nullptr, nullptr, &tv);
+        break;
+    case WaitFor::kWrite:
+        rc = select(0, nullptr, &primary, nullptr, &tv);
+        break;
+    case WaitFor::kConnect:
+    default:
+        FD_SET(ToSocket(socket), &except);
+        rc = select(0, nullptr, &primary, &except, &tv);
+        break;
+    }
     if (rc == SOCKET_ERROR) return SG_NETWORK_ERROR;
-    // An exceptional condition (failed connect) also counts as "ready": the
-    // following operation reports the actual error.
+    // A failed connect (exception set) also counts as "ready": the following
+    // FinishConnect() reports the actual error.
     *ready = rc > 0;
     return OkStatus();
 }

@@ -38,7 +38,10 @@ private:
     Status status_;
 };
 
-enum class WaitFor { kRead, kWrite };
+// kConnect waits for a non-blocking connect to finish (success or failure).
+// kRead/kWrite deliberately ignore exceptional conditions such as TCP urgent
+// data, which would otherwise make a wait return immediately forever.
+enum class WaitFor { kRead, kWrite, kConnect };
 
 // Resolves host:port. passive=true resolves a bind address ("" = any).
 Status ResolveAddresses(const std::string& host, uint16_t port, bool passive,

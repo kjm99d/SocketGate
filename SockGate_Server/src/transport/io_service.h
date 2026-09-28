@@ -40,8 +40,12 @@ public:
     // was fully handed to the OS (or with an error status).
     virtual Status AsyncWrite(std::vector<uint8_t> data, WriteHandler handler) = 0;
 
-    // Stops accepting new writes and closes once queued data has been sent
-    // (bounded by the service's shutdown behaviour). Used for graceful close.
+    // Graceful close: refuses new writes; once every queued byte was handed to
+    // the OS the send direction is shut down (FIN) and remaining input is
+    // discarded until the peer closes, then the stream closes. Closing with
+    // unread input would make the OS send RST and could destroy the queued
+    // response in flight. The owner must bound this phase with its own
+    // timeout by calling Close().
     virtual void CloseAfterWrites() noexcept = 0;
 
     // Immediately closes the socket and cancels pending operations. Idempotent.
@@ -71,11 +75,12 @@ public:
     virtual Status Listen(const std::string& bind_address, uint16_t port, AcceptHandler on_accept,
                           uint16_t* bound_port) = 0;
 
-    // Runs fn on a worker thread.
+    // Runs fn on a worker thread. Refused with SG_CLOSED once Stop() began.
     virtual Status Post(std::function<void()> fn) = 0;
 
     // Stops accepting, closes every stream, waits for outstanding operations
-    // and joins the worker threads. Must not be called from a worker thread.
+    // and joins the worker threads. Idempotent and safe to call concurrently;
+    // must not be called from a worker thread.
     virtual void Stop() noexcept = 0;
 
     virtual size_t StreamCount() const noexcept = 0;

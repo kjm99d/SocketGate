@@ -4,6 +4,9 @@
 // object that holds a shared_ptr to the owning stream while the operation is
 // pending. The kernel may therefore complete (or cancel) an operation at any
 // time without the OVERLAPPED ever being freed underneath it.
+//
+// Listener sockets are only used and closed under listeners_mutex_, so a
+// worker can never issue AcceptEx against a handle Stop() already closed.
 #include "transport/io_service.h"
 
 #include "sockgate_common/platform/socket.h"
@@ -15,6 +18,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -27,6 +32,8 @@ namespace {
 constexpr ULONG_PTR kQuitKey = 1;
 constexpr int kAcceptsPerListener = 8;
 constexpr DWORD kAddressLength = sizeof(SOCKADDR_STORAGE) + 16;
+constexpr auto kStopDrainTimeout = std::chrono::seconds(10);
+constexpr DWORD kAcceptRetryDelayMs = 20;
 
 enum class OpType { kAccept, kRead, kWrite, kTask };
 
@@ -66,9 +73,32 @@ struct Listener {
     LPFN_ACCEPTEX accept_ex = nullptr;
     LPFN_GETACCEPTEXSOCKADDRS get_addrs = nullptr;
     std::vector<std::unique_ptr<AcceptOp>> ops;
+
+    ~Listener()
+    {
+        if (socket != INVALID_SOCKET) closesocket(socket);
+        for (auto& op : ops) {
+            if (op->accept_socket != INVALID_SOCKET) closesocket(op->accept_socket);
+        }
+    }
 };
 
 using Callback = std::function<void()>;
+
+void InvokeSafely(const Callback& cb) noexcept
+{
+    try {
+        cb();
+    } catch (...) {
+        // A throwing user handler must not skip the remaining callbacks.
+    }
+}
+
+void InvokeAll(std::vector<Callback>& callbacks) noexcept
+{
+    for (auto& cb : callbacks) InvokeSafely(cb);
+    callbacks.clear();
+}
 
 class IocpStream final : public AsyncStream, public std::enable_shared_from_this<IocpStream> {
 public:
@@ -109,9 +139,12 @@ private:
         WriteHandler handler;
     };
 
-    // All of these append callbacks that must be invoked after the lock is released.
+    // All *Locked helpers append callbacks to be invoked after the lock is released.
+    bool StartReadLocked();
     void StartWriteLocked(std::vector<Callback>* deferred);
-    void CloseLocked(std::vector<Callback>* deferred);
+    void StartDrainLocked(std::vector<Callback>* deferred);
+    void FinishGracefulLocked(std::vector<Callback>* deferred);
+    void CloseLocked(std::vector<Callback>* deferred, Status reason);
     // Fails queued writes; keeps the front entry when a write is still in flight
     // (its cancelled completion fails it later).
     void FailQueuedWritesLocked(std::vector<Callback>* deferred, Status status);
@@ -124,6 +157,8 @@ private:
     mutable std::mutex mutex_;
     bool closed_ = false;
     bool close_after_writes_ = false;
+    bool send_shutdown_ = false;
+    bool draining_ = false;  // internal read that discards input until EOF
 
     std::vector<uint8_t> read_buffer_;
     bool read_pending_ = false;
@@ -152,8 +187,15 @@ public:
         return streams_.size();
     }
 
-    void OpStarted() noexcept { outstanding_ops_.fetch_add(1, std::memory_order_relaxed); }
-    void OpFinished() noexcept { outstanding_ops_.fetch_sub(1, std::memory_order_acq_rel); }
+    void OpStarted() noexcept { outstanding_ops_.fetch_add(1, std::memory_order_acq_rel); }
+    void OpFinished() noexcept
+    {
+        if (outstanding_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lock(ops_mutex_);
+            ops_cv_.notify_all();
+        }
+    }
+
     void Unregister(uint64_t id)
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
@@ -167,14 +209,14 @@ public:
     {
         if (deferred.empty()) return;
         auto shared = std::make_shared<std::vector<Callback>>(std::move(deferred));
-        if (!Post([shared]() { for (auto& cb : *shared) cb(); }).ok()) {
-            for (auto& cb : *shared) cb();
-        }
+        if (!PostInternal([shared]() { InvokeAll(*shared); }).ok()) InvokeAll(*shared);
     }
 
 private:
+    Status PostInternal(std::function<void()> fn);
     void WorkerLoop();
-    void PostAccept(AcceptOp* op);
+    void PostAcceptLocked(AcceptOp* op);
+    void RetryAcceptLater(AcceptOp* op);
     void OnAcceptComplete(AcceptOp* op, bool ok);
 
     platform::NetworkRuntime net_;
@@ -185,6 +227,10 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<uint64_t> next_stream_id_{1};
+
+    std::mutex stop_mutex_;
+    std::mutex ops_mutex_;
+    std::condition_variable ops_cv_;
 
     std::mutex post_mutex_;
     bool quitting_ = false;  // guarded by post_mutex_
@@ -205,6 +251,24 @@ IocpStream::~IocpStream()
     service_->Unregister(id_);
 }
 
+bool IocpStream::StartReadLocked()
+{
+    read_op_.Reset();
+    read_op_.stream = shared_from_this();
+    WSABUF buf;
+    buf.buf = reinterpret_cast<char*>(read_buffer_.data());
+    buf.len = static_cast<ULONG>(read_buffer_.size());
+    DWORD flags = 0;
+    service_->OpStarted();
+    if (WSARecv(socket_, &buf, 1, nullptr, &flags, &read_op_.overlapped, nullptr) == SOCKET_ERROR &&
+        WSAGetLastError() != WSA_IO_PENDING) {
+        service_->OpFinished();
+        read_op_.stream.reset();
+        return false;
+    }
+    return true;
+}
+
 Status IocpStream::AsyncRead(ReadHandler handler)
 {
     if (!handler) return SG_INVALID_ARGUMENT;
@@ -212,27 +276,15 @@ Status IocpStream::AsyncRead(ReadHandler handler)
     Status result = OkStatus();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (closed_) return SG_CLOSED;
+        if (closed_ || draining_) return SG_CLOSED;
         if (read_pending_) return SG_INVALID_STATE;
-
         read_handler_ = std::move(handler);
         read_pending_ = true;
-        read_op_.Reset();
-        read_op_.stream = shared_from_this();
-
-        WSABUF buf;
-        buf.buf = reinterpret_cast<char*>(read_buffer_.data());
-        buf.len = static_cast<ULONG>(read_buffer_.size());
-        DWORD flags = 0;
-        service_->OpStarted();
-        if (WSARecv(socket_, &buf, 1, nullptr, &flags, &read_op_.overlapped, nullptr) == SOCKET_ERROR &&
-            WSAGetLastError() != WSA_IO_PENDING) {
-            // Nothing was queued: undo and fail synchronously without invoking the handler.
-            service_->OpFinished();
+        if (!StartReadLocked()) {
+            // Nothing was queued: fail synchronously without invoking the handler.
             read_pending_ = false;
             read_handler_ = nullptr;
-            read_op_.stream.reset();
-            CloseLocked(&deferred);
+            CloseLocked(&deferred, SG_NETWORK_ERROR);
             result = SG_NETWORK_ERROR;
         }
     }
@@ -240,32 +292,62 @@ Status IocpStream::AsyncRead(ReadHandler handler)
     return result;
 }
 
+void IocpStream::StartDrainLocked(std::vector<Callback>* deferred)
+{
+    draining_ = true;
+    read_pending_ = true;
+    if (!StartReadLocked()) {
+        read_pending_ = false;
+        draining_ = false;
+        CloseLocked(deferred, SG_CLOSED);
+    }
+}
+
 void IocpStream::OnReadComplete(bool ok, DWORD bytes)
 {
+    std::vector<Callback> deferred;
     ReadHandler handler;
     std::shared_ptr<IocpStream> self;
     Status status = OkStatus();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         self = std::move(read_op_.stream);
-        handler = std::move(read_handler_);
-        read_handler_ = nullptr;
         read_pending_ = false;
-        if (closed_) {
-            status = SG_CLOSED;
-        } else if (!ok) {
-            status = SG_NETWORK_ERROR;
-        } else if (bytes == 0) {
-            status = SG_CLOSED;  // orderly shutdown by the peer
-        }
-    }
-    if (handler) {
-        if (status.ok()) {
-            handler(status, read_buffer_.data(), bytes);
+        if (draining_) {
+            // Graceful close: discard input until the peer's FIN (or an error).
+            if (!closed_ && ok && bytes > 0) {
+                StartDrainLocked(&deferred);
+            } else {
+                draining_ = false;
+                CloseLocked(&deferred, SG_CLOSED);
+            }
         } else {
-            handler(status, nullptr, 0);
+            handler = std::move(read_handler_);
+            read_handler_ = nullptr;
+            if (closed_) {
+                status = SG_CLOSED;
+            } else if (!ok) {
+                status = SG_NETWORK_ERROR;
+            } else if (bytes == 0) {
+                status = SG_CLOSED;  // orderly shutdown by the peer
+            }
         }
     }
+    InvokeAll(deferred);
+    if (!handler) return;
+
+    if (status.ok()) {
+        InvokeSafely([&]() { handler(status, read_buffer_.data(), bytes); });
+    } else {
+        InvokeSafely([&]() { handler(status, nullptr, 0); });
+    }
+
+    // After a half-close, keep draining once the owner stops reading.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!closed_ && send_shutdown_ && !read_pending_ && !draining_) StartDrainLocked(&deferred);
+    }
+    InvokeAll(deferred);
 }
 
 Status IocpStream::AsyncWrite(std::vector<uint8_t> data, WriteHandler handler)
@@ -301,7 +383,7 @@ void IocpStream::StartWriteLocked(std::vector<Callback>* deferred)
         service_->OpFinished();
         write_in_flight_ = false;
         write_op_.stream.reset();
-        CloseLocked(deferred);
+        CloseLocked(deferred, SG_NETWORK_ERROR);
     }
 }
 
@@ -315,13 +397,13 @@ void IocpStream::OnWriteComplete(bool ok, DWORD bytes)
         write_in_flight_ = false;
         if (!ok || closed_ || write_queue_.empty()) {
             const Status failure = closed_ ? Status(SG_CLOSED) : Status(SG_NETWORK_ERROR);
-            CloseLocked(&deferred);
+            CloseLocked(&deferred, failure);
             FailQueuedWritesLocked(&deferred, failure);
         } else {
             PendingWrite& front = write_queue_.front();
             const size_t advanced = std::min<size_t>(bytes, front.data.size() - front.offset);
             front.offset += advanced;
-            pending_write_bytes_ -= advanced;
+            pending_write_bytes_ -= std::min(pending_write_bytes_, advanced);
             if (front.offset == front.data.size()) {
                 if (front.handler) {
                     WriteHandler h = std::move(front.handler);
@@ -332,11 +414,21 @@ void IocpStream::OnWriteComplete(bool ok, DWORD bytes)
             if (!write_queue_.empty()) {
                 StartWriteLocked(&deferred);
             } else if (close_after_writes_) {
-                CloseLocked(&deferred);
+                FinishGracefulLocked(&deferred);
             }
         }
     }
-    for (auto& cb : deferred) cb();
+    InvokeAll(deferred);
+}
+
+void IocpStream::FinishGracefulLocked(std::vector<Callback>* deferred)
+{
+    if (closed_ || send_shutdown_) return;
+    send_shutdown_ = true;
+    // Half-close: the peer receives FIN after every queued byte. Closing with
+    // unread input would instead send RST and could destroy data in flight.
+    shutdown(socket_, SD_SEND);
+    if (!read_pending_) StartDrainLocked(deferred);
 }
 
 void IocpStream::CloseAfterWrites() noexcept
@@ -346,7 +438,7 @@ void IocpStream::CloseAfterWrites() noexcept
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return;
         close_after_writes_ = true;
-        if (!write_in_flight_ && write_queue_.empty()) CloseLocked(&deferred);
+        if (!write_in_flight_ && write_queue_.empty()) FinishGracefulLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
 }
@@ -356,12 +448,12 @@ void IocpStream::Close() noexcept
     std::vector<Callback> deferred;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        CloseLocked(&deferred);
+        CloseLocked(&deferred, SG_CLOSED);
     }
     service_->RunDeferred(std::move(deferred));
 }
 
-void IocpStream::CloseLocked(std::vector<Callback>* deferred)
+void IocpStream::CloseLocked(std::vector<Callback>* deferred, Status reason)
 {
     if (closed_) return;
     closed_ = true;
@@ -370,7 +462,7 @@ void IocpStream::CloseLocked(std::vector<Callback>* deferred)
         closesocket(socket_);
         socket_ = INVALID_SOCKET;
     }
-    FailQueuedWritesLocked(deferred, SG_CLOSED);
+    FailQueuedWritesLocked(deferred, reason.ok() ? Status(SG_CLOSED) : reason);
     const uint64_t id = id_;
     IocpService* service = service_;
     deferred->push_back([service, id]() { service->Unregister(id); });
@@ -395,6 +487,7 @@ void IocpStream::FailQueuedWritesLocked(std::vector<Callback>* deferred, Status 
 
 Status IocpService::Start(const IoServiceOptions& options)
 {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
     if (running_.load()) return SG_INVALID_STATE;
     SG_TRY(net_.status());
     options_ = options;
@@ -407,11 +500,21 @@ Status IocpService::Start(const IoServiceOptions& options)
     if (iocp_ == nullptr) return SG_NETWORK_ERROR;
 
     stopping_ = false;
+    {
+        std::lock_guard<std::mutex> lock(post_mutex_);
+        quitting_ = false;
+    }
     running_ = true;
     try {
         for (uint32_t i = 0; i < threads; ++i) workers_.emplace_back([this]() { WorkerLoop(); });
     } catch (...) {
-        Stop();
+        // Tear down the threads that did start.
+        for (size_t i = 0; i < workers_.size(); ++i) PostQueuedCompletionStatus(iocp_, 0, kQuitKey, nullptr);
+        for (auto& w : workers_) w.join();
+        workers_.clear();
+        CloseHandle(iocp_);
+        iocp_ = nullptr;
+        running_ = false;
         return SG_OUT_OF_MEMORY;
     }
     return OkStatus();
@@ -429,7 +532,7 @@ Status IocpService::Listen(const std::string& bind_address, uint16_t port, Accep
     auto listener = std::make_unique<Listener>();
     platform::NativeSocket native = platform::kInvalidSocket;
     SG_TRY(platform::CreateListener(addresses.front(), options_.listen_backlog, false, &native));
-    listener->socket = static_cast<SOCKET>(native);
+    listener->socket = static_cast<SOCKET>(native);  // closed by ~Listener on any failure below
     listener->family = addresses.front().Family();
     listener->on_accept = std::move(on_accept);
 
@@ -441,38 +544,36 @@ Status IocpService::Listen(const std::string& bind_address, uint16_t port, Accep
         WSAIoctl(listener->socket, SIO_GET_EXTENSION_FUNCTION_POINTER, &get_addrs_guid, sizeof(get_addrs_guid),
                  &listener->get_addrs, sizeof(listener->get_addrs), &bytes, nullptr, nullptr) != 0 ||
         CreateIoCompletionPort(reinterpret_cast<HANDLE>(listener->socket), iocp_, 0, 0) == nullptr) {
-        closesocket(listener->socket);
         return SG_NETWORK_ERROR;
     }
 
     if (bound_port != nullptr) {
         platform::SocketAddress local;
-        if (!platform::GetLocalAddress(static_cast<platform::NativeSocket>(listener->socket), &local).ok()) {
-            closesocket(listener->socket);
-            return SG_NETWORK_ERROR;
-        }
+        SG_TRY(platform::GetLocalAddress(static_cast<platform::NativeSocket>(listener->socket), &local));
         *bound_port = local.Port();
     }
 
+    std::lock_guard<std::mutex> lock(listeners_mutex_);
+    if (stopping_.load()) return SG_INVALID_STATE;  // ~Listener closes the socket
     Listener* raw = listener.get();
-    {
-        std::lock_guard<std::mutex> lock(listeners_mutex_);
-        for (int i = 0; i < kAcceptsPerListener; ++i) {
-            auto op = std::make_unique<AcceptOp>();
-            op->listener = raw;
-            raw->ops.push_back(std::move(op));
-        }
-        listeners_.push_back(std::move(listener));
-        for (auto& op : raw->ops) PostAccept(op.get());
+    for (int i = 0; i < kAcceptsPerListener; ++i) {
+        auto op = std::make_unique<AcceptOp>();
+        op->listener = raw;
+        raw->ops.push_back(std::move(op));
     }
+    listeners_.push_back(std::move(listener));
+    for (auto& op : raw->ops) PostAcceptLocked(op.get());
     return OkStatus();
 }
 
-void IocpService::PostAccept(AcceptOp* op)
+void IocpService::PostAcceptLocked(AcceptOp* op)
 {
-    if (stopping_.load()) return;
+    if (stopping_.load() || op->listener->socket == INVALID_SOCKET) return;
     platform::NativeSocket native = platform::kInvalidSocket;
-    if (!platform::CreateTcpSocket(op->listener->family, false, &native).ok()) return;
+    if (!platform::CreateTcpSocket(op->listener->family, false, &native).ok()) {
+        RetryAcceptLater(op);
+        return;
+    }
     op->accept_socket = static_cast<SOCKET>(native);
     op->Reset();
     DWORD received = 0;
@@ -483,18 +584,31 @@ void IocpService::PostAccept(AcceptOp* op)
         OpFinished();
         closesocket(op->accept_socket);
         op->accept_socket = INVALID_SOCKET;
+        RetryAcceptLater(op);
     }
+}
+
+void IocpService::RetryAcceptLater(AcceptOp* op)
+{
+    // Resource exhaustion (e.g. WSAENOBUFS): keep the accept slot alive by
+    // retrying shortly instead of silently shrinking the accept pipeline.
+    PostInternal([this, op]() {
+        Sleep(kAcceptRetryDelayMs);
+        std::lock_guard<std::mutex> lock(listeners_mutex_);
+        PostAcceptLocked(op);
+    }).IgnoreError();
 }
 
 void IocpService::OnAcceptComplete(AcceptOp* op, bool ok)
 {
     SOCKET accepted = op->accept_socket;
     op->accept_socket = INVALID_SOCKET;
-    Listener* listener = op->listener;
 
-    if (!ok || stopping_.load()) {
+    std::unique_lock<std::mutex> lock(listeners_mutex_);
+    Listener* listener = op->listener;
+    if (!ok || stopping_.load() || listener->socket == INVALID_SOCKET) {
         if (accepted != INVALID_SOCKET) closesocket(accepted);
-        if (!stopping_.load()) PostAccept(op);
+        PostAcceptLocked(op);  // no-op while stopping
         return;
     }
 
@@ -521,7 +635,9 @@ void IocpService::OnAcceptComplete(AcceptOp* op, bool ok)
         SetFileCompletionNotificationModes(reinterpret_cast<HANDLE>(accepted), FILE_SKIP_SET_EVENT_ON_HANDLE);
 
     // Keep the accept pipeline full before running user code.
-    PostAccept(op);
+    PostAcceptLocked(op);
+    AcceptHandler on_accept = listener->on_accept;
+    lock.unlock();
 
     if (!configured) {
         closesocket(accepted);
@@ -538,17 +654,25 @@ void IocpService::OnAcceptComplete(AcceptOp* op, bool ok)
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(streams_mutex_);
+        std::lock_guard<std::mutex> streams_lock(streams_mutex_);
         streams_[stream->Id()] = stream;
     }
     if (stopping_.load()) {
         stream->Close();
         return;
     }
-    listener->on_accept(stream);
+    InvokeSafely([&]() { on_accept(stream); });
 }
 
 Status IocpService::Post(std::function<void()> fn)
+{
+    // External work is refused as soon as shutdown begins so that a task that
+    // keeps re-posting itself cannot hold Stop() hostage.
+    if (stopping_.load()) return SG_CLOSED;
+    return PostInternal(std::move(fn));
+}
+
+Status IocpService::PostInternal(std::function<void()> fn)
 {
     if (!fn) return SG_INVALID_ARGUMENT;
     std::lock_guard<std::mutex> lock(post_mutex_);
@@ -579,14 +703,12 @@ void IocpService::WorkerLoop()
         IoOp* op = CONTAINING_RECORD(overlapped, IoOp, overlapped);
         switch (op->type) {
         case OpType::kRead: {
-            auto* sop = static_cast<StreamOp*>(op);
-            std::shared_ptr<IocpStream> stream = sop->stream;  // completion owns a reference
+            std::shared_ptr<IocpStream> stream = static_cast<StreamOp*>(op)->stream;
             if (stream) stream->OnReadComplete(ok != FALSE, bytes);
             break;
         }
         case OpType::kWrite: {
-            auto* sop = static_cast<StreamOp*>(op);
-            std::shared_ptr<IocpStream> stream = sop->stream;
+            std::shared_ptr<IocpStream> stream = static_cast<StreamOp*>(op)->stream;
             if (stream) stream->OnWriteComplete(ok != FALSE, bytes);
             break;
         }
@@ -595,10 +717,7 @@ void IocpService::WorkerLoop()
             break;
         case OpType::kTask: {
             std::unique_ptr<TaskOp> task(static_cast<TaskOp*>(op));
-            try {
-                task->fn();
-            } catch (...) {
-            }
+            InvokeSafely(task->fn);
             break;
         }
         }
@@ -608,6 +727,7 @@ void IocpService::WorkerLoop()
 
 void IocpService::Stop() noexcept
 {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
     if (!running_.load()) return;
     const std::thread::id self = std::this_thread::get_id();
     for (const auto& w : workers_) {
@@ -635,12 +755,16 @@ void IocpService::Stop() noexcept
     for (auto& s : streams) s->Close();
     streams.clear();
 
-    // Wait (bounded) for every pending operation to drain before tearing down.
-    for (int i = 0; i < 10000 && outstanding_ops_.load() > 0; ++i) Sleep(1);
+    // Wait for every pending operation (I/O and internal tasks) to drain.
+    bool drained;
+    {
+        std::unique_lock<std::mutex> lock(ops_mutex_);
+        drained = ops_cv_.wait_for(lock, kStopDrainTimeout, [this]() { return outstanding_ops_.load() <= 0; });
+    }
 
     {
         // Tasks queued before the quit packets still run (the port is FIFO);
-        // later Post() calls are refused so nothing is stranded in the port.
+        // later posts are refused so nothing is stranded in the port.
         std::lock_guard<std::mutex> lock(post_mutex_);
         quitting_ = true;
         for (size_t i = 0; i < workers_.size(); ++i) PostQueuedCompletionStatus(iocp_, 0, kQuitKey, nullptr);
@@ -652,23 +776,24 @@ void IocpService::Stop() noexcept
 
     {
         std::lock_guard<std::mutex> lock(listeners_mutex_);
-        for (auto& l : listeners_) {
-            for (auto& op : l->ops) {
-                if (op->accept_socket != INVALID_SOCKET) closesocket(op->accept_socket);
-            }
+        if (drained) {
+            listeners_.clear();
+        } else {
+            // Operations are still owned by the kernel: freeing their OVERLAPPED
+            // buffers would be a use-after-free. Leak deliberately (fatal-path only).
+            for (auto& l : listeners_) (void)l.release();
+            listeners_.clear();
         }
-        listeners_.clear();
     }
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
         streams_.clear();
     }
-    CloseHandle(iocp_);
+    if (drained) CloseHandle(iocp_);
     iocp_ = nullptr;
     {
         std::lock_guard<std::mutex> lock(post_mutex_);
         running_ = false;
-        quitting_ = false;
     }
 }
 

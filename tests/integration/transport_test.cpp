@@ -334,6 +334,84 @@ SG_TEST(IoService, PostRunsOnWorker)
     SG_EXPECT_STATUS(io->Post([]() {}), SG_CLOSED);
 }
 
+SG_TEST(IoService, GracefulCloseWithUnreadInputDoesNotReset)
+{
+    // The server never reads what the client sent; closing must still deliver
+    // the whole response followed by an orderly end-of-stream (no RST).
+    auto io = sg::server::CreateIoService();
+    SG_ASSERT_OK(io->Start({}));
+    uint16_t port = 0;
+    const auto response = RandomBytes(200 * 1024, 11);
+    std::mutex held_mutex;
+    std::vector<std::shared_ptr<AsyncStream>> held;
+    std::promise<void> client_sent;
+    auto client_sent_future = client_sent.get_future().share();
+    SG_ASSERT_OK(io->Listen("127.0.0.1", 0,
+                            [&](std::shared_ptr<AsyncStream> s) {
+                                {
+                                    std::lock_guard<std::mutex> lock(held_mutex);
+                                    held.push_back(s);
+                                }
+                                // Respond only after the client's data is sitting unread in our buffer.
+                                io->Post([s, &response, client_sent_future]() {
+                                    client_sent_future.wait();
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                                    std::vector<uint8_t> copy = response;
+                                    if (s->AsyncWrite(std::move(copy), nullptr).ok()) s->CloseAfterWrites();
+                                }).IgnoreError();
+                            },
+                            &port));
+
+    TcpTransport client(FastOptions());
+    SG_ASSERT_OK(client.Connect({"127.0.0.1", port}));
+    const auto unread = RandomBytes(32 * 1024, 12);
+    SG_ASSERT_OK(client.Send(unread.data(), unread.size()));
+    client_sent.set_value();
+
+    std::vector<uint8_t> got(response.size());
+    SG_ASSERT_OK(ReceiveExactly(client, got.data(), got.size()));
+    SG_EXPECT(got == response);
+    // Our shutdown lets the server's drain observe EOF and close the stream.
+    client.Shutdown();
+    for (int i = 0; i < 200 && io->StreamCount() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    SG_EXPECT_EQ(io->StreamCount(), size_t{0});
+    io->Stop();
+    held.clear();
+}
+
+SG_TEST(IoService, SelfRepostingTaskDoesNotStallStop)
+{
+    auto io = sg::server::CreateIoService();
+    SG_ASSERT_OK(io->Start({}));
+    std::atomic<int> runs{0};
+    std::function<void()> task;
+    task = [&]() {
+        runs.fetch_add(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        io->Post(task).IgnoreError();
+    };
+    SG_ASSERT_OK(io->Post(task));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto start = std::chrono::steady_clock::now();
+    io->Stop();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    SG_EXPECT(runs.load() > 0);
+    SG_EXPECT(ms < 2000);
+}
+
+SG_TEST(IoService, ConcurrentStopIsSafe)
+{
+    EchoServer server;
+    server.Start();
+    TcpTransport client(FastOptions());
+    SG_ASSERT_OK(client.Connect({"127.0.0.1", server.port}));
+    std::thread a([&]() { server.io->Stop(); });
+    std::thread b([&]() { server.io->Stop(); });
+    a.join();
+    b.join();
+    SG_EXPECT_STATUS(server.io->Post([]() {}), SG_CLOSED);
+}
+
 SG_TEST(IoService, StopWithActiveConnectionsDoesNotHang)
 {
     EchoServer server;

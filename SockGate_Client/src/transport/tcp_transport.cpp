@@ -73,13 +73,7 @@ Status TcpTransport::Connect(const net::Endpoint& endpoint)
         const uint32_t remaining = deadline.RemainingMs(UINT32_MAX);
         const uint32_t budget = deadline.infinite() ? 0 : (remaining == 0 ? 1 : remaining);
         last = ConnectOne(address, budget);
-        if (last.ok()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            peer_ = address.ToString();
-            connected_ = true;
-            return OkStatus();
-        }
-        if (last == SG_CLOSED) return last;  // shutdown requested while connecting
+        if (last.ok() || last == SG_CLOSED) return last;  // SG_CLOSED: shutdown requested
     }
     return last;
 }
@@ -115,7 +109,7 @@ Status TcpTransport::ConnectOne(const platform::SocketAddress& address, uint32_t
                 break;
             }
             bool ready = false;
-            result = platform::WaitSocket(s, platform::WaitFor::kWrite, deadline.RemainingMs(kWaitSliceMs), &ready);
+            result = platform::WaitSocket(s, platform::WaitFor::kConnect, deadline.RemainingMs(kWaitSliceMs), &ready);
             if (result.ok() && ready) {
                 if (op.ShutdownRequested()) {
                     result = SG_CLOSED;
@@ -125,28 +119,38 @@ Status TcpTransport::ConnectOne(const platform::SocketAddress& address, uint32_t
                 in_progress = false;
             }
         }
+        if (result.ok()) {
+            // Still inside the in-flight scope: Close() cannot release s meanwhile.
+            platform::SetTcpNoDelay(s, true).IgnoreError();
+            platform::SetKeepAlive(s, true).IgnoreError();
+        }
     }
 
+    std::lock_guard<std::mutex> lock(mutex_);
     if (result.ok()) {
-        platform::SetTcpNoDelay(s, true).IgnoreError();
-        platform::SetKeepAlive(s, true).IgnoreError();
+        // Close() may have raced the end of the connect and already released s.
+        if (shutdown_ || socket_ != s) return SG_CLOSED;
+        peer_ = address.ToString();
+        connected_ = true;
         return OkStatus();
     }
-
-    // Failed attempt: release this socket (waiting for nothing else, as no other
-    // operation can use it before connected_ is set).
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (socket_ == s) socket_ = platform::kInvalidSocket;
-    platform::CloseSocket(s);
+    // Failed attempt: release the socket only if we still own it. Close() may
+    // already have closed it, and the handle number may since have been reused.
+    if (socket_ == s) {
+        socket_ = platform::kInvalidSocket;
+        platform::CloseSocket(s);
+    }
     return result;
 }
 
 Status TcpTransport::Send(const uint8_t* data, size_t size)
 {
     if (data == nullptr && size != 0) return SG_INVALID_ARGUMENT;
-    std::lock_guard<std::mutex> serial(send_mutex_);
+    // Registered as in flight *before* waiting for the serial lock, so Close()
+    // (and the destructor) wait until this thread has released send_mutex_.
     InFlight op(this);
     SG_TRY(op.status());
+    std::lock_guard<std::mutex> serial(send_mutex_);
 
     const Deadline deadline(options_.io_timeout_ms);
     size_t offset = 0;
@@ -175,9 +179,9 @@ Status TcpTransport::ReceiveFor(uint8_t* buffer, size_t capacity, size_t* receiv
 {
     if (buffer == nullptr || capacity == 0 || received == nullptr) return SG_INVALID_ARGUMENT;
     *received = 0;
-    std::lock_guard<std::mutex> serial(receive_mutex_);
-    InFlight op(this);
+    InFlight op(this);  // before the serial lock, see Send()
     SG_TRY(op.status());
+    std::lock_guard<std::mutex> serial(receive_mutex_);
 
     const Deadline deadline(timeout_ms);
     for (;;) {
