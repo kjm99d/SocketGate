@@ -1,51 +1,95 @@
-/*
- * SockGate - status codes.
+#ifndef SOCKGATE_ERROR_H
+#define SOCKGATE_ERROR_H
+/**
+ * @file
+ * @brief SockGate - status codes.
+ * @ingroup sg_common
  *
  * Numeric values are part of the ABI: never renumber, only append.
  * Local applications receive specific codes; the wire protocol only ever
  * carries generalised results so remote peers cannot probe internal state.
  */
-#ifndef SOCKGATE_ERROR_H
-#define SOCKGATE_ERROR_H
 
 #include <stdint.h>
 
+/**
+ * @defgroup sg_common Common types and status codes
+ * @brief Status codes, identifiers, constants and ABI macros shared by the client and server libraries.
+ *
+ * Declared in sockgate/error.h, sockgate/types.h, sockgate/export.h and sockgate/version.h.
+ *
+ * ABI conventions used by both libraries:
+ * - Enumerations are transported as uint32_t fields plus \#define constants.
+ * - Versioned structures start with { uint32_t size; uint32_t version; } and are initialised with their
+ *   *_Init() function. The libraries read only the fields that lie within `size`.
+ * - No C++ exception crosses the API: internal failures are reported as SG_OUT_OF_MEMORY or
+ *   SG_INTERNAL_ERROR. The codes listed per function are the notable ones, not all possible ones: treat any
+ *   other code as an error.
+ * @{
+ */
+
+/** @brief Result of a SockGate function: one of the ::SG_StatusCode values. */
 typedef int32_t SG_Status;
 
+/**
+ * @brief SockGate status codes (values of ::SG_Status).
+ *
+ * The numeric values are part of the ABI.
+ */
 enum SG_StatusCode {
-    SG_OK                   = 0,
+    SG_OK                   = 0,  /**< Success. */
+    /** Invalid argument or configuration: NULL pointer, size, structure size / version, string length, or a
+     *  message that cannot be encoded. */
     SG_INVALID_ARGUMENT     = 1,
-    SG_OUT_OF_MEMORY        = 2,
-    SG_NETWORK_ERROR        = 3,
-    SG_TLS_ERROR            = 4,
+    SG_OUT_OF_MEMORY        = 2,  /**< Memory allocation failed. */
+    SG_NETWORK_ERROR        = 3,  /**< Socket, connection or address resolution error. */
+    SG_TLS_ERROR            = 4,  /**< TLS negotiation or record error, including TLS 1.2 without EMS. */
+    /** Certificate chain, host name or validity check failed, or a certificate / CA could not be loaded. */
     SG_CERTIFICATE_ERROR    = 5,
-    SG_PINNING_ERROR        = 6,
-    SG_AUTH_FAILED          = 7,
+    SG_PINNING_ERROR        = 6,  /**< The validated chain matches none of the configured SPKI pins. */
+    SG_AUTH_FAILED          = 7,  /**< Authentication failed (local reason). */
+    /** Signature verification failed (client: a required server proof is missing or invalid). */
     SG_INVALID_SIGNATURE    = 8,
-    SG_CHALLENGE_EXPIRED    = 9,
-    SG_REPLAY_DETECTED      = 10,
+    SG_CHALLENGE_EXPIRED    = 9,  /**< An authentication challenge expired. */
+    SG_REPLAY_DETECTED      = 10, /**< A frame with an old sequence number or a duplicate request id arrived. */
+    /** Protocol violation: malformed frame, frame not allowed in the current phase, skipped sequence number
+     *  or failed tag check. */
     SG_PROTOCOL_ERROR       = 11,
+    /** The server rejected the authentication or re-authentication, or closed the session with an
+     *  authentication failure. */
     SG_SERVER_REJECTED      = 12,
-    SG_SESSION_EXPIRED      = 13,
+    SG_SESSION_EXPIRED      = 13, /**< The session expired. */
+    /** Integrity category code. Not returned by the current implementation: a denial by the server's
+     *  integrity policy reaches the client as SG_SERVER_REJECTED. */
     SG_INTEGRITY_FAILED     = 14,
-    SG_TIMEOUT              = 15,
-    SG_INVALID_STATE        = 16,
-    SG_BUFFER_TOO_SMALL     = 17,
+    SG_TIMEOUT              = 15, /**< The operation timed out. */
+    SG_INVALID_STATE        = 16, /**< The call is not allowed in the current state. */
+    SG_BUFFER_TOO_SMALL     = 17, /**< The caller's buffer is too small. */
+    /** Feature or platform not supported, or a non-zero structure field (flag, mask bit or appended field)
+     *  that this build does not know. */
     SG_NOT_SUPPORTED        = 18,
-    SG_CLOSED               = 19,
-    SG_KEYSTORE_ERROR       = 20,
-    SG_NOT_FOUND            = 21,
-    SG_ALREADY_EXISTS       = 22,
-    SG_LIMIT_EXCEEDED       = 23,
-    SG_PROXY_ERROR          = 24,
-    SG_VERSION_MISMATCH     = 25,
-    SG_CRYPTO_ERROR         = 26,
+    SG_CLOSED               = 19, /**< The connection is closed (close_notify, EOF or CLOSE). */
+    SG_KEYSTORE_ERROR       = 20, /**< Key store error. */
+    SG_NOT_FOUND            = 21, /**< The requested object does not exist. */
+    SG_ALREADY_EXISTS       = 22, /**< The object already exists. */
+    SG_LIMIT_EXCEEDED       = 23, /**< A resource limit was exceeded. */
+    SG_PROXY_ERROR          = 24, /**< Proxy negotiation failed. */
+    SG_VERSION_MISMATCH     = 25, /**< Wire layout version mismatch or failed protocol version negotiation. */
+    SG_CRYPTO_ERROR         = 26, /**< A cryptographic operation failed. */
+    /** Internal error, including an exception caught at the API boundary or an internal code outside the
+     *  public range. */
     SG_INTERNAL_ERROR       = 27,
-    SG_STORAGE_ERROR        = 28,
-    SG_IDENTITY_LOST        = 29  /* the key store that held the identity no longer has its key */
+    SG_STORAGE_ERROR        = 28, /**< Server storage (registry or license file) could not be read or written. */
+    SG_IDENTITY_LOST        = 29  /**< The key store that held the identity no longer has its key. */
 };
 
-/* Returns a static, human readable name for a status code. Never NULL. */
+/**
+ * @brief Returns a static, human readable name for a status code.
+ *
+ * @param[in] status Status code; any value is accepted.
+ * @return The code's name (e.g. "SG_OK"), or "SG_UNKNOWN_STATUS" for an unknown value. Never NULL.
+ * @note Thread-safe. Defined static inline so that the client and server libraries do not both export it.
+ */
 static inline const char* SG_StatusString(SG_Status status)
 {
     switch (status) {
@@ -82,5 +126,7 @@ static inline const char* SG_StatusString(SG_Status status)
     default:                   return "SG_UNKNOWN_STATUS";
     }
 }
+
+/** @} */
 
 #endif /* SOCKGATE_ERROR_H */
