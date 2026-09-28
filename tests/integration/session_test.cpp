@@ -9,6 +9,7 @@
 #include <sockgate/client.h>
 #include <sockgate/server.h>
 
+#include "sockgate_common/core/clock.h"
 #include "sockgate_common/crypto/crypto.h"
 
 #include <atomic>
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -388,6 +390,33 @@ SG_TEST(Session, RevocationClosesLiveSession)
     SG_ASSERT_OK(SG_Client_GetIdentity(client.get(), &id));
 
     SG_ASSERT_OK(SG_Server_RevokeClient(server.server, &id.installation_id));
+    char buf[16];
+    size_t n = 0;
+    SG_EXPECT_STATUS(SG_Client_ReceiveEx(client.get(), buf, sizeof(buf), &n, nullptr, 5000), SG_SERVER_REJECTED);
+    const SG_ServerConfig t = Target(server.port);
+    SG_ASSERT_OK(SG_Client_Connect(client.get(), &t));
+    SG_EXPECT_STATUS(SG_Client_Authenticate(client.get()), SG_SERVER_REJECTED);
+}
+
+SG_TEST(Session, RevocationTakesEffectWhenStorageFails)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-e2e-registry-io-" + std::to_string(sg::MonotonicMs()));
+    fs::create_directories(dir);
+    const std::string registry_path = (dir / "registry.bin").string();
+    TestServer server;
+    server.configure = [&](SG_ServerOptions& o) { o.registry_path = registry_path.c_str(); };
+    server.Start();
+    ClientPtr client(NewClient());
+    server.Register(client.get());
+    ConnectAndAuth(client.get(), server.port);
+    SG_IdentityInfo id;
+    SG_IdentityInfo_Init(&id);
+    SG_ASSERT_OK(SG_Client_GetIdentity(client.get(), &id));
+
+    fs::remove_all(dir);  // the revocation cannot be persisted...
+    SG_EXPECT_STATUS(SG_Server_RevokeClient(server.server, &id.installation_id), SG_STORAGE_ERROR);
+    // ...but the live session is closed and the installation is refused.
     char buf[16];
     size_t n = 0;
     SG_EXPECT_STATUS(SG_Client_ReceiveEx(client.get(), buf, sizeof(buf), &n, nullptr, 5000), SG_SERVER_REJECTED);

@@ -294,6 +294,8 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_GetSessionInfo(SG_Server* server, SG_S
                                                          SG_ServerSessionInfo* info);
 
 /* Registry. Revocation closes the installation's live sessions immediately.
+ * Revocations (of installations and licenses) that cannot be persisted still
+ * take effect in this process and return SG_STORAGE_ERROR.
  * A license binding in a record or token must name an active license for
  * the same product when the license store knows it (SG_INVALID_STATE /
  * SG_INVALID_ARGUMENT), and must exist with SG_SERVER_OPT_REQUIRE_LICENSE

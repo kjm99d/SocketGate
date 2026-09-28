@@ -610,6 +610,29 @@ SG_TEST(KeyStore, IdentityLifecycle)
     SG_EXPECT_STATUS(ks->DeleteKey("com.example.app"), SG_NOT_FOUND);
 }
 
+SG_TEST(Registry, RevocationSurvivesStorageFailure)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-registry-io-" + std::to_string(sg::MonotonicMs()));
+    fs::create_directories(dir);
+    auto ks = CreateMemoryKeyStore();
+    IdentityInfo id;
+    SG_ASSERT_OK(EnsureIdentity(*ks, "app", &id));
+    std::unique_ptr<IClientRegistry> reg;
+    SG_ASSERT_OK(CreateFileClientRegistry((dir / "registry.bin").string(), &reg));
+    ClientRecord rec;
+    rec.installation_id = id.installation_id;
+    rec.public_key = id.public_key;
+    SG_ASSERT_OK(reg->Register(rec));
+
+    fs::remove_all(dir);  // every further write fails
+    SG_EXPECT_STATUS(reg->Revoke(id.installation_id), SG_STORAGE_ERROR);
+    ClientRecord after;
+    SG_ASSERT_OK(reg->Find(id.installation_id, &after));
+    SG_EXPECT(after.status == ClientStatus::kRevoked);
+    SG_EXPECT_OK(reg->Revoke(id.installation_id));  // idempotent from now on
+}
+
 SG_TEST(Registry, FilePersistenceAndCorruption)
 {
     namespace fs = std::filesystem;

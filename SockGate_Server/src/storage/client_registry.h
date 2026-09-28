@@ -36,7 +36,9 @@ public:
     // SG_ALREADY_EXISTS if the installation id is known (active or revoked).
     virtual Status Register(const ClientRecord& record) = 0;
 
-    // SG_NOT_FOUND when unknown. Idempotent for already revoked records.
+    // SG_NOT_FOUND when unknown. Idempotent for already revoked records. If
+    // persisting fails the record stays revoked in memory and
+    // SG_STORAGE_ERROR is returned: I/O errors never undo a revocation.
     virtual Status Revoke(const proto::InstallationId& id) = 0;
 
     // Atomically consumes `token_id` and inserts `record`. Fails without any

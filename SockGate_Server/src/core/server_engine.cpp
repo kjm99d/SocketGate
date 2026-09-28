@@ -327,7 +327,10 @@ Status ServerEngine::RegisterClient(const ClientRecord& record)
 
 Status ServerEngine::RevokeClient(const proto::InstallationId& installation_id)
 {
-    SG_TRY(registry_->Revoke(installation_id));
+    // SG_STORAGE_ERROR: revoked in memory but not persisted. The revocation
+    // still takes effect for this process; the caller learns it is not durable.
+    const Status st = registry_->Revoke(installation_id);
+    if (!st.ok() && st != SG_STORAGE_ERROR) return st;
     revocations_.fetch_add(1);
     // Revocation takes effect immediately for live sessions.
     const size_t closed = CloseMatching([&](Connection& conn) { return conn.IsInstallation(installation_id); });
@@ -336,9 +339,9 @@ Status ServerEngine::RevokeClient(const proto::InstallationId& installation_id)
     if (registry_->Find(installation_id, &record).ok() && !record.license_id.empty()) {
         licenses_->ReleaseSeat(record.license_id, installation_id).IgnoreError();
     }
-    SG_LOGI(config_.logger, "event=installation_revoked installation=%s sessions_closed=%zu",
-            ShortId(installation_id).c_str(), closed);
-    return OkStatus();
+    SG_LOGI(config_.logger, "event=installation_revoked installation=%s sessions_closed=%zu durable=%d",
+            ShortId(installation_id).c_str(), closed, st.ok() ? 1 : 0);
+    return st;
 }
 
 Status ServerEngine::AddLicense(const LicenseRecord& record)

@@ -50,9 +50,7 @@ public:
         if (it == records_.end()) return SG_NOT_FOUND;
         if (it->second.status == ClientStatus::kRevoked) return OkStatus();
         it->second.status = ClientStatus::kRevoked;
-        const Status st = PersistLocked();
-        if (!st.ok()) it->second.status = ClientStatus::kActive;
-        return st;
+        return PersistLocked().ok() ? OkStatus() : Status(SG_STORAGE_ERROR);
     }
 
     Status EnrollAtomically(const ClientRecord& record, const proto::TokenId& token_id,

@@ -232,6 +232,29 @@ SG_TEST(LicenseStore, FilePersistenceAndCorruption)
     fs::remove_all(dir);
 }
 
+SG_TEST(LicenseStore, RevocationSurvivesStorageFailure)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-license-io-" + std::to_string(MonotonicMs()));
+    fs::create_directories(dir);
+    std::unique_ptr<ILicenseStore> store;
+    SG_ASSERT_OK(CreateFileLicenseStore((dir / "licenses.bin").string(), &store));
+    SG_ASSERT_OK(store->Upsert(License("L1", 0x1)));
+    bool newly = false;
+    SG_ASSERT_OK(store->BindSeat("L1", Iid(1), &newly));
+
+    fs::remove_all(dir);  // every further write fails
+    SG_EXPECT_STATUS(store->Revoke("L1"), SG_STORAGE_ERROR);
+    LicenseRecord rec;
+    SG_ASSERT_OK(store->Find("L1", &rec));
+    SG_EXPECT(rec.status == LicenseStatus::kRevoked);
+    // Other changes are rolled back instead.
+    SG_EXPECT(!store->Upsert(License("L2", 0x1)).ok());
+    SG_EXPECT_STATUS(store->Find("L2", &rec), SG_NOT_FOUND);
+    SG_EXPECT(!store->ReleaseSeat("L1", Iid(1)).ok());
+    SG_EXPECT_OK(store->HasSeat("L1", Iid(1)));
+}
+
 SG_TEST(Authorization, GrantsOnlyLicensedFeatures)
 {
     Fixture f;
