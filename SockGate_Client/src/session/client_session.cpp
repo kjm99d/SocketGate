@@ -835,13 +835,17 @@ void ClientSession::Disconnect() noexcept
         if (previous != SG_CLIENT_STATE_DISCONNECTED) SG_LOGI(settings_.logger, "event=disconnected");
 
         // Wait for operations that were woken up to leave, then drop the
-        // receive state of the old connection.
+        // receive state of the old connection (or an older one) - unless a
+        // Connect() on another thread already set up a newer one meanwhile
+        // (generations only grow).
         std::lock_guard<std::mutex> recv(recv_mutex_);
         std::lock_guard<std::mutex> send(send_mutex_);
-        queue_.clear();
-        queued_bytes_ = 0;
-        phase_ = proto::Phase::kClosed;
-        recv_generation_ = 0;
+        if (recv_generation_ <= link.generation) {
+            queue_.clear();
+            queued_bytes_ = 0;
+            phase_ = proto::Phase::kClosed;
+            recv_generation_ = 0;
+        }
     } catch (...) {
         // Allocation failure while disconnecting: the transport shutdown above
         // (if reached) already woke every blocked operation.
