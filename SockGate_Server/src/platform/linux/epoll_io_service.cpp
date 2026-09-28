@@ -61,8 +61,10 @@ public:
     {
     }
 
-    // Dropping the last reference closes the connection. Streams must not
-    // outlive the IIoService that created them.
+    // Dropping the last reference closes the connection; a pending read or
+    // write and a graceful close in progress hold a reference of their own
+    // (self_), as the operations of the IOCP implementation do. Streams must
+    // not outlive the IIoService that created them.
     ~EpollStream() override;
 
     Status AsyncRead(ReadHandler handler) override;
@@ -99,6 +101,9 @@ private:
     void FinishGracefulLocked(std::vector<Callback>* deferred);
     void CloseLocked(std::vector<Callback>* deferred, Status reason);
     void FailWritesLocked(std::vector<Callback>* deferred, Status status);
+    // Takes or releases self_ to match the pending work; a release is handed
+    // to `deferred` so the destructor never runs under mutex_.
+    void UpdateSelfLocked(std::vector<Callback>* deferred);
 
     EpollService* service_;
     int fd_;
@@ -118,6 +123,8 @@ private:
 
     std::deque<PendingWrite> write_queue_;
     size_t pending_write_bytes_ = 0;
+
+    std::shared_ptr<EpollStream> self_;  // held while a read, a write or the drain is pending
 };
 
 struct Listener {
@@ -250,6 +257,7 @@ Status EpollStream::AsyncRead(ReadHandler handler)
             CloseLocked(&deferred, SG_NETWORK_ERROR);
             result = SG_NETWORK_ERROR;
         }
+        UpdateSelfLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
     return result;
@@ -265,6 +273,7 @@ Status EpollStream::AsyncWrite(std::vector<uint8_t> data, WriteHandler handler)
         pending_write_bytes_ += data.size();
         write_queue_.push_back(PendingWrite{std::move(data), 0, std::move(handler)});
         if (write_queue_.size() == 1) RearmOrCloseLocked(&deferred);
+        UpdateSelfLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
     return OkStatus();
@@ -342,6 +351,7 @@ void EpollStream::OnEvent(uint32_t events)
         }
         if (!closed_ && close_after_writes_ && write_queue_.empty()) FinishGracefulLocked(&deferred);
         RearmOrCloseLocked(&deferred);
+        UpdateSelfLocked(&deferred);
     }
     // Event-driven callbacks run inline on this worker thread.
     InvokeAll(deferred);
@@ -353,6 +363,7 @@ void EpollStream::OnEvent(uint32_t events)
             draining_ = true;
             RearmOrCloseLocked(&deferred);
         }
+        UpdateSelfLocked(&deferred);
     }
     InvokeAll(deferred);
 }
@@ -378,6 +389,7 @@ void EpollStream::CloseAfterWrites() noexcept
         if (closed_) return;
         close_after_writes_ = true;
         if (write_queue_.empty()) FinishGracefulLocked(&deferred);
+        UpdateSelfLocked(&deferred);
     }
     service_->RunDeferred(std::move(deferred));
 }
@@ -426,6 +438,17 @@ void EpollStream::CloseLocked(std::vector<Callback>* deferred, Status reason)
     const uint64_t id = id_;
     EpollService* service = service_;
     deferred->push_back([service, id]() { service->Unregister(id); });
+    UpdateSelfLocked(deferred);
+}
+
+void EpollStream::UpdateSelfLocked(std::vector<Callback>* deferred)
+{
+    const bool busy = !closed_ && (read_pending_ || draining_ || !write_queue_.empty());
+    if (busy && !self_) {
+        self_ = shared_from_this();
+    } else if (!busy && self_) {
+        deferred->push_back([last = std::move(self_)]() {});  // released when the callback list is destroyed
+    }
 }
 
 // ---------------------------------------------------------------------------

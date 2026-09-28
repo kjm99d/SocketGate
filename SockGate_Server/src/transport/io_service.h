@@ -38,8 +38,10 @@ namespace sg::server {
 /**
  * @brief An accepted TCP connection with asynchronous read and write.
  *
- * All methods are thread-safe. Dropping the last reference closes the connection; a stream must not outlive the
- * IIoService that created it.
+ * All methods are thread-safe. Dropping the last reference closes the connection, but while I/O is pending (a read,
+ * queued writes, or the drain of a graceful close) the stream keeps itself open until that I/O completes, Close() is
+ * called, or IIoService::Stop() runs - so dropping the owner's reference never cuts queued writes short. To abandon a
+ * stream, call Close(). A stream must not outlive the IIoService that created it.
  */
 class AsyncStream {
 public:
@@ -93,7 +95,7 @@ public:
      * discarded until the peer closes, then the stream closes. Closing with
      * unread input would make the OS send RST and could destroy the queued
      * response in flight. The owner must bound this phase with its own
-     * timeout by calling Close().
+     * timeout by calling Close(), so it keeps a reference until then.
      */
     virtual void CloseAfterWrites() noexcept = 0;
 
