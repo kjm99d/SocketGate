@@ -3,8 +3,10 @@
 if(SOCKGATE_SANITIZER)
     if(MSVC)
         if(SOCKGATE_SANITIZER MATCHES "address")
+            # STL container annotations stay enabled (default): they add
+            # container-overflow checks and must match the prebuilt ASan /
+            # libFuzzer runtimes, which use annotated containers themselves.
             add_compile_options(/fsanitize=address /Zi)
-            add_compile_definitions(_DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
             # Incremental linking and /RTC are incompatible with ASan.
             string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
             string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
@@ -40,6 +42,10 @@ if(SOCKGATE_BUILD_FUZZERS)
     if(MSVC)
         add_compile_options(/fsanitize-coverage=inline-8bit-counters /fsanitize-coverage=edge
                             /fsanitize-coverage=trace-cmp /fsanitize-coverage=trace-div)
+        # Instrumented code outside the libFuzzer executables (tests, mutation
+        # drivers, modules) needs the coverage runtime that /fsanitize=fuzzer
+        # would otherwise provide (dynamic CRT variants).
+        add_link_options("$<$<NOT:$<BOOL:$<TARGET_PROPERTY:SOCKGATE_LIBFUZZER>>>:$<IF:$<CONFIG:Debug>,sancovd.lib,sancov.lib>>")
     else()
         add_compile_options(-fsanitize=fuzzer-no-link)
     endif()
@@ -47,6 +53,7 @@ endif()
 
 # sockgate_enable_fuzzer(<target>)
 function(sockgate_enable_fuzzer target)
+    set_target_properties(${target} PROPERTIES SOCKGATE_LIBFUZZER TRUE)
     if(MSVC)
         target_compile_options(${target} PRIVATE /fsanitize=fuzzer)
         target_link_options(${target} PRIVATE /INCREMENTAL:NO)

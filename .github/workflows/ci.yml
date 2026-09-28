@@ -1,0 +1,216 @@
+# SockGate CI: builds and tests every supported platform / toolchain, runs
+# the sanitizers, the TPM paths (swtpm) and the fuzzers. Actions are pinned
+# to commit SHAs (Dependabot keeps them current).
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"   # nightly: long fuzzing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes the running check; pushes to
+# branches, the nightly run and manual runs are never cancelled (each event
+# kind has its own group, so a push cannot cancel the nightly fuzzing).
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    name: windows / ${{ matrix.preset }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [windows-msvc-debug, windows-msvc-release, windows-clangcl-debug, windows-clangcl-release, windows-msvc-asan]
+    env:
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+      - name: vcpkg cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  linux:
+    name: linux / ${{ matrix.os }} / ${{ matrix.preset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        preset: [linux-gcc-debug, linux-gcc-release, linux-clang-debug, linux-clang-release, linux-gcc-asan, linux-clang-asan, linux-clang-tsan]
+        include:
+          - os: ubuntu-24.04-arm
+            preset: linux-gcc-release
+          - os: ubuntu-24.04-arm
+            preset: linux-clang-asan
+          - os: ubuntu-22.04
+            preset: linux-gcc-debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build cmake gcc g++ clang libssl-dev
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        env:
+          # TSan: report and fail on the first data race.
+          TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  linux-tpm2:
+    name: linux / TPM2 (swtpm)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake g++ libssl-dev \
+            libtss2-dev swtpm swtpm-tools pkg-config
+      - name: Start swtpm
+        run: |
+          mkdir -p "$RUNNER_TEMP/swtpm"
+          swtpm socket --tpm2 --tpmstate dir="$RUNNER_TEMP/swtpm" \
+            --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
+            --flags not-need-init,startup-clear --daemon
+      - name: Configure
+        run: cmake --preset linux-gcc-debug -DSOCKGATE_WITH_TPM2=ON
+      - name: Build
+        run: cmake --build --preset linux-gcc-debug
+      - name: Test (TPM required)
+        env:
+          SOCKGATE_TPM2_TCTI: swtpm:host=127.0.0.1,port=2321
+          SOCKGATE_REQUIRE_TPM: "1"
+        run: ctest --preset linux-gcc-debug --output-on-failure
+
+  package:
+    name: package / ${{ matrix.os }} / shared=${{ matrix.shared }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        shared: ["ON", "OFF"]
+    env:
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        if: runner.os == 'Windows'
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build cmake g++ libssl-dev
+      - name: Build and install
+        shell: bash
+        run: |
+          preset=$([ "$RUNNER_OS" = "Windows" ] && echo windows-msvc-release || echo linux-gcc-release)
+          cmake --preset "$preset" -DSOCKGATE_BUILD_SHARED=${{ matrix.shared }} -DSOCKGATE_BUILD_TESTS=OFF
+          cmake --build --preset "$preset"
+          cmake --install "out/build/$preset" --prefix "$RUNNER_TEMP/sockgate"
+          echo "PRESET=$preset" >> "$GITHUB_ENV"
+      - name: Consumer (find_package)
+        shell: bash
+        run: |
+          extra=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            extra="-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DVCPKG_INSTALLED_DIR=$GITHUB_WORKSPACE/vcpkg_installed"
+          fi
+          # The Windows VCPKG_ROOT path uses backslashes; CMake wants forward slashes.
+          if [ "$RUNNER_OS" = "Windows" ]; then extra="${extra//\\//}"; fi
+          cmake -S tests/package -B build-consumer -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sockgate" $extra
+          cmake --build build-consumer
+          # RUNNER_TEMP is a Windows path (D:\a\_temp) there: its ':' would split PATH.
+          prefix="$RUNNER_TEMP/sockgate"
+          if [ "$RUNNER_OS" = "Windows" ]; then prefix="$(cygpath -u "$prefix")"; fi
+          PATH="$prefix/bin:$PATH" ./build-consumer/consumer
+
+  containers:
+    name: container / ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "rockylinux:9"]
+    steps:
+      - name: Dependencies (Debian)
+        if: startsWith(matrix.image, 'debian')
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git ninja-build cmake g++ libssl-dev
+      - name: Dependencies (Rocky)
+        if: startsWith(matrix.image, 'rocky')
+        # ninja-build lives in CRB on Rocky 9.
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y --setopt=install_weak_deps=False git ninja-build cmake gcc-c++ openssl-devel
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Configure
+        run: cmake --preset linux-gcc-debug
+      - name: Build
+        run: cmake --build --preset linux-gcc-debug
+      - name: Test
+        run: ctest --preset linux-gcc-debug --output-on-failure
+
+  fuzz:
+    name: fuzz / libFuzzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build cmake clang libssl-dev
+      - name: Configure
+        run: cmake --preset linux-clang-fuzz
+      - name: Build
+        run: cmake --build --preset linux-clang-fuzz
+      - name: Fuzz
+        env:
+          # 60 s per target on every push, 20 min per target nightly.
+          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || '60' }}
+          # -fsanitize=integer findings are recoverable by default: make every
+          # sanitizer report a crash libFuzzer records.
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+        run: |
+          # Not -e (GitHub runs bash -e): every target runs even if one crashed.
+          set +e -uo pipefail
+          cd out/build/linux-clang-fuzz/bin || exit 1
+          failed=""
+          for target in sg_fuzz_*; do
+            mkdir -p "corpus/$target"
+            "./sg_mutate_${target#sg_fuzz_}" --write-seeds="corpus/$target" || failed="$failed $target(seeds)"
+            "./$target" "corpus/$target" -max_total_time="$FUZZ_SECONDS" -print_final_stats=1 \
+              -artifact_prefix="artifacts-$target-" || failed="$failed $target"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::fuzz failures:$failed"
+            exit 1
+          fi
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: out/build/linux-clang-fuzz/bin/artifacts-*
