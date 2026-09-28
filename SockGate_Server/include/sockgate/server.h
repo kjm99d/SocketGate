@@ -151,7 +151,7 @@ typedef struct SG_ServerSessionInfo {
     uint32_t expires_in_ms;
     uint32_t enrolled;
     char peer_address[64];
-    char product_id[65];
+    char product_id[65];               /* registered product; the client's claim if none is registered */
     char license_id[129];              /* registered or verified license, never a raw claim */
     char reserved[6];
     uint32_t license_status;           /* SG_LICENSE_STATUS_* of license_id */
