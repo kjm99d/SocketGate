@@ -31,14 +31,18 @@
  *    activation, kept until SG_Server_ReleaseLicenseSeat or
  *    SG_Server_RevokeClient, not only while connected.
  *
- * Threading: callbacks run without any SockGate lock held, usually on I/O
- * worker threads, but also on the thread whose call closed a session
- * (SG_Server_CloseSession, SG_Server_RevokeClient, SG_Server_Stop, a failing
- * SG_Server_Send) and on the internal timer thread (expiry, idle timeout).
- * Callbacks for one session are serialised and ordered; callbacks for
- * different sessions may run concurrently. Every API function except
- * SG_Server_Stop and SG_Server_Destroy may be called from a callback,
- * including for the session being processed. A slow on_message callback
+ * Threading: callbacks run without any SockGate lock held (except the ones
+ * SG_Server_Stop / SG_Server_Destroy deliver, under their lifecycle lock),
+ * usually on I/O worker threads, but also on the thread whose call closed a
+ * session (SG_Server_CloseSession, SG_Server_RevokeClient,
+ * SG_Server_RevokeLicense, SG_Server_ReleaseLicenseSeat, SG_Server_Stop, a
+ * failing SG_Server_Send) and on the internal timer thread (expiry, idle
+ * timeout). The log callback is the exception: it may run while internal
+ * locks are held, so it must only record the message and never call a
+ * SockGate function. Callbacks for one session are serialised and ordered;
+ * callbacks for different sessions may run concurrently. Every API function
+ * except SG_Server_Start, SG_Server_Stop and SG_Server_Destroy may be called
+ * from a callback, including for the session being processed. A slow on_message callback
  * applies backpressure: reading from that session pauses until it returns.
  */
 #ifndef SOCKGATE_SERVER_H
@@ -162,10 +166,23 @@ typedef struct SG_ServerCallbacks {
     /* Called after cryptographic authentication, before the session opens. */
     SG_Status (SG_CALL *on_authorize)(void* user, const SG_AuthRequest* request, SG_AuthDecision* decision);
     /* ENROLL validation for externally issued tokens. Must return SG_OK and
-     * the token's 32-byte key K_tok, or an error to reject. NULL = built-in
-     * tokens from SG_Server_IssueEnrollmentToken. SG_OK approves the token and
-     * registers the installation with the claimed product; a claimed license
-     * is NOT bound (it is treated like any license claim, see above). */
+     * the token's 32-byte key K_tok, or an error to reject. NULL = only
+     * built-in tokens from SG_Server_IssueEnrollmentToken are accepted; when
+     * set, built-in tokens are rejected (set it only if all tokens come from
+     * your issuer).
+     * This is a key lookup, called BEFORE anything is verified: the request
+     * (token_pub included) is unauthenticated and may come from anyone who saw
+     * the token's public part. SockGate enforces single use per registry: the
+     * token is marked used (permanently) and the installation registered only
+     * after the channel-bound token proof, the key and the signature were
+     * verified - and before on_authorize, so an enrollment that on_authorize
+     * denies has still used its token. Servers with separate registries do
+     * not share that record: to keep a token single-use across them, consume
+     * it here, atomically, in a shared store. Anyone who saw token_pub can
+     * then burn the token (a denial of service, never an enrollment), so keep
+     * such tokens short-lived. On success the installation is registered with
+     * the claimed product; a claimed license is NOT bound (it is treated like
+     * any license claim, see above). */
     SG_Status (SG_CALL *on_enroll)(void* user, const SG_EnrollRequest* request, uint8_t token_key_out[32]);
     void (SG_CALL *on_session_opened)(void* user, const SG_ServerSessionInfo* info);
     void (SG_CALL *on_message)(void* user, SG_SessionHandle session, const void* data, size_t size,
@@ -195,7 +212,8 @@ typedef struct SG_ServerOptions {
     const char* proof_key_pem;
     size_t proof_key_pem_size;
 
-    /* Enrollment token secret (>= 32 bytes). NULL = random per server start. */
+    /* Enrollment token secret (>= 32 bytes). NULL = random per SG_Server_Create:
+     * tokens issued by one server object are not valid for another. */
     const uint8_t* token_key;
     size_t token_key_size;
 

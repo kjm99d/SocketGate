@@ -16,7 +16,8 @@ extern "C" {
 #endif
 
 /* ---- Key store selection (SG_ClientConfig.key_store_type) ---------------- */
-#define SG_KEYSTORE_AUTO         0u /* strongest available: TPM -> OS store -> protected file */
+#define SG_KEYSTORE_AUTO         0u /* strongest available. Windows: CNG TPM -> CNG Software;
+                                       Linux: TPM2 (if built) -> protected file */
 #define SG_KEYSTORE_MEMORY       1u /* process memory, not persistent (tests, ephemeral) */
 #define SG_KEYSTORE_FILE         2u /* PKCS#8 file (0600 on Linux, DPAPI-wrapped on Windows) */
 #define SG_KEYSTORE_CNG_SOFTWARE 3u /* Windows: Microsoft Software KSP, non-exportable */

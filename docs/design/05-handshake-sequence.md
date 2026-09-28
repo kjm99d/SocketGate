@@ -120,9 +120,13 @@ Client                                                                     Serve
 
 - Enrollment 성공 시 그 연결은 바로 인증된 세션이 된다.
 - 폐기된 installation_id 는 재등록할 수 없다 (ID 가 공개키에서 유도되므로 새 키 = 새 ID).
-- `server_token_key` 는 서버 설정으로 로드하거나 서버 시작 시 CSPRNG 로 생성한다(바이너리에 포함 금지).
-- 내장 token 검증과 1회 사용 추적은 **단일 서버 노드** 기준이다. 여러 노드가 같은 `server_token_key` 를 공유하면
+- `server_token_key` 는 서버 설정으로 로드하거나 `SG_Server_Create` 시 CSPRNG 로 생성한다(바이너리에 포함 금지).
+- 내장 token 검증과 1회 사용 추적은 **단일 서버 노드**(레지스트리) 기준이다. 여러 노드가 같은 `server_token_key` 를 공유하면
   노드마다 1회씩 사용될 수 있으므로, 다중 노드 환경에서는 `on_enroll` 콜백으로 중앙 저장소에서 원자적으로 소비해야 한다.
+  `on_enroll` 은 검증 전(키 조회 단계)에 호출되므로, 여기서 소비하면 token 의 공개 부분을 본 누구나 token 을 소진시킬 수
+  있다 (서비스 거부일 뿐 등록 우회는 아님). 이런 token 은 TTL 을 짧게 준다.
+- 서버의 1회 사용 기록과 등록은 증명·키·서명 검증 후, Authorizer 호출 **전**에 원자적으로 저장된다. Authorizer 가 거부한
+  enrollment 도 token 은 소진된다.
 - 권장: enrollment 시에도 사설 CA 또는 SPKI pinning 을 사용한다 (token 탈취는 막히지만, 가짜 서버가 enrollment 를
   가로채 클라이언트를 속이는 것은 서버 인증으로만 막을 수 있다).
 
