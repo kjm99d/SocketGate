@@ -18,6 +18,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* memset() of a buffer that is not read afterwards may be optimised away;
+ * volatile stores are not. */
+static void wipe(void* data, size_t size)
+{
+    volatile unsigned char* p = (volatile unsigned char*)data;
+    while (size-- > 0) *p++ = 0;
+}
+
 static void print_hex(const char* label, const uint8_t* data, size_t size)
 {
     size_t i;
@@ -79,7 +87,7 @@ static int read_token(const char* path, char* buffer, size_t capacity)
     n = fread(buffer, 1, capacity - 1, f);
     extra = fgetc(f);
     if (ferror(f) || extra != EOF) {
-        memset(buffer, 0, capacity);
+        wipe(buffer, capacity);
         n = 0;
     }
     fclose(f);
@@ -209,7 +217,7 @@ int main(int argc, char** argv)
     }
     st = SG_Client_Connect(client, &server);
     if (st == SG_OK) st = enroll_token != NULL ? SG_Client_Enroll(client, enroll_token) : SG_Client_Authenticate(client);
-    memset(token, 0, sizeof(token)); /* single use: not needed any more */
+    wipe(token, sizeof(token)); /* single use: not needed any more */
     if (st != SG_OK) {
         fprintf(stderr, "connect/authenticate: %s\n", SG_StatusString(st));
         if (st == SG_SERVER_REJECTED && enroll_token == NULL) {

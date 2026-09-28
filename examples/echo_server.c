@@ -16,6 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* memset() of a buffer that is not read afterwards may be optimised away;
+ * volatile stores are not. */
+static void wipe(void* data, size_t size)
+{
+    volatile unsigned char* p = (volatile unsigned char*)data;
+    while (size-- > 0) *p++ = 0;
+}
+
 static void SG_CALL on_log(void* user, uint32_t level, const char* message)
 {
     (void)user;
@@ -68,7 +76,7 @@ static size_t read_file(const char* path, uint8_t* buffer, size_t capacity)
     extra = fgetc(f);
     if (ferror(f) || extra != EOF) n = 0;
     fclose(f);
-    if (n == 0) memset(buffer, 0, capacity);
+    if (n == 0) wipe(buffer, capacity);
     return n;
 }
 
@@ -172,7 +180,7 @@ int main(int argc, char** argv)
         if (token_key_size < 32) {
             fprintf(stderr, "token key file must hold 32..%u random bytes (see sg_admin token-key)\n",
                     (unsigned)sizeof(token_key));
-            memset(token_key, 0, sizeof(token_key));
+            wipe(token_key, sizeof(token_key));
             return 1;
         }
         options.token_key = token_key;
@@ -180,7 +188,7 @@ int main(int argc, char** argv)
     }
 
     st = SG_Server_Create(&options, &g_server);
-    memset(token_key, 0, sizeof(token_key));
+    wipe(token_key, sizeof(token_key)); /* SG_Server_Create keeps its own copy */
     if (st != SG_OK) {
         fprintf(stderr, "SG_Server_Create: %s\n", SG_StatusString(st));
         return 1;
@@ -207,7 +215,7 @@ int main(int argc, char** argv)
         } else {
             fprintf(stderr, "SG_Server_IssueEnrollmentToken: %s\n", SG_StatusString(st));
         }
-        memset(token, 0, sizeof(token));
+        wipe(token, sizeof(token));
     }
 
     printf("press Enter to stop\n");
