@@ -6,7 +6,7 @@
 
 ### 1.1 Winsock 초기화
 
-- `WSAStartup(2.2)` 는 프로세스 전역 참조 카운트로 관리한다 (`WinsockInit` RAII, 첫 Create 에서 시작, 마지막 Destroy 에서 `WSACleanup`).
+- `WSAStartup(2.2)` 는 프로세스 전역 참조 카운트로 관리한다 (`platform::NetworkRuntime` RAII 를 클라이언트 `TcpTransport` 와 서버 IOCP IoService 가 보유. 첫 인스턴스에서 시작, 마지막 인스턴스 해제 시 `WSACleanup`).
 - 애플리케이션이 이미 `WSAStartup` 을 호출했어도 참조 카운트 방식이라 충돌하지 않는다.
 
 ### 1.2 클라이언트 소켓 (TcpTransport)
@@ -14,11 +14,11 @@
 | 항목 | 구현 |
 |---|---|
 | 생성 | `WSASocketW(AF_INET/AF_INET6, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED \| WSA_FLAG_NO_HANDLE_INHERIT)` |
-| 비동기 연결 | `ioctlsocket(FIONBIO)` → `connect` → `WSAPoll(POLLWRNORM)` + `SO_ERROR` 확인 |
-| 송수신 타임아웃 | `WSAPoll` 로 대기 후 `send`/`recv` |
+| 비동기 연결 | `ioctlsocket(FIONBIO)` → `connect` → `select`(write + exception 집합) + `SO_ERROR` 확인. `WSAPoll` 이 아니라 `select` 를 쓴다: 모든 Windows 10 빌드에서 실패한 non-blocking connect 를 exception 집합으로 확실히 보고한다 |
+| 송수신 타임아웃 | `select`(read 또는 write 집합만) 로 대기 후 `send`/`recv` |
 | 주소 해석 | `GetAddrInfoW` (UTF-8 → UTF-16 변환), 결과 순회 |
 | 옵션 | `TCP_NODELAY`, `SO_KEEPALIVE`, `SO_EXCLUSIVEADDRUSE`(서버) |
-| 취소 | `shutdown(SD_BOTH)` 로 대기 중 `WSAPoll` 을 깨운 뒤, in-flight 종료 후 `closesocket` |
+| 취소 | `shutdown(SD_BOTH)` 로 대기 중 `select` 를 깨운 뒤, in-flight 종료 후 `closesocket` |
 
 WinHTTP / WinINet 은 **사용하지 않는다**. 따라서 시스템 proxy 설정(IE/WinHTTP)이 transport 에 자동 적용되지 않는다.
 `ProxyMode::System` 을 명시적으로 선택한 경우에만 `WinHttpGetIEProxyConfigForCurrentUser` 로 설정을 **읽어**
@@ -31,7 +31,7 @@ CreateIoCompletionPort ─┬─ Listen socket (AcceptEx 사전 게시 N개)
                         ├─ Connection sockets (WSARecv / WSASend overlapped)
                         └─ PostQueuedCompletionStatus (작업 게시, 종료 신호)
 
-Worker thread × N: GetQueuedCompletionStatusEx → IoOperation* → 핸들러
+Worker thread × N: GetQueuedCompletionStatus (Ex 아님, 1 회에 완료 1 개) → IoOp* → 핸들러
 ```
 
 - `AcceptEx` / `GetAcceptExSockaddrs` 는 `WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)` 로 획득.
@@ -86,7 +86,7 @@ Software KSP 의 키는 Windows 가 DPAPI 로 보호하는 사용자 프로필 �
 - `SG_TRUST_SYSTEM_STORE` 가 설정되면 `CertOpenSystemStoreW(L"ROOT")` 의 인증서를 OpenSSL `X509_STORE` 에 추가한다.
 - 기본값은 애플리케이션이 제공한 CA (사설 PKI) 만 신뢰 + pinning 권장.
 
-## 3. Integrity (`WindowsPlatformSecurity`)
+## 3. Integrity (`integrity_win.cpp`, `os::CollectIntegrityReport`)
 
 | 관측 | 방법 | flag |
 |---|---|---|
@@ -112,11 +112,14 @@ Software KSP 의 키는 Windows 가 DPAPI 로 보호하는 사용자 프로필 �
 | `/CETCOMPAT` | CET shadow stack 호환 |
 | `/DYNAMICBASE /HIGHENTROPYVA` | ASLR |
 | `/NXCOMPAT` | DEP |
-| `/Qspectre` (옵션) | Spectre 완화 |
-| `/W4 /permissive- /utf-8` | 경고, 표준 준수 |
-| Release: `/O2 /Gy /GL`, 링크 `/OPT:REF /OPT:ICF /LTCG` | 최적화, 미사용 코드 제거 |
-| Release: PDB 는 별도 보관, 배포물에 포함하지 않음 (`/DEBUG` 는 PDB 생성용, 배포 시 제외) | 심볼 제거 |
+| `/Qspectre` (옵션) | Spectre 완화 (v1 미구현: 옵션이 없고 사용하지 않는다) |
+| `/W4 /permissive- /utf-8` (+ `/Zc:__cplusplus /EHsc /bigobj`) | 경고, 표준 준수 |
+| Release/RelWithDebInfo: `/Gy /Zi`, 링크 `/OPT:REF /OPT:ICF` (최적화 수준은 CMake 기본값 `/O2`) | 최적화, 미사용 코드 제거 (v1 미구현: `/GL` + `/LTCG` 전체 프로그램 최적화는 쓰지 않는다) |
+| Release: PDB 는 별도 보관, 배포물에 포함하지 않음 (`/Zi` + 링크 `/DEBUG` 는 PDB 생성용, 배포 시 제외) | 심볼 제거 |
 | export | `__declspec(dllexport)` 가 붙은 `SG_*` 함수만 |
+
+`/GS /sdl /guard:cf` 와 링크 hardening 플래그는 `SOCKGATE_HARDENING`(기본 ON) 일 때만, 링크 플래그는 DLL/EXE 에만 붙는다.
+Sanitizer 빌드에는 위 Release 행의 `/Gy /Zi`, `/DEBUG /OPT:*` 를 붙이지 않는다 (`cmake/SockGateCompilerFlags.cmake`).
 
 ## 5. 런타임 검증
 

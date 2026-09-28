@@ -24,14 +24,14 @@
 
 ```text
 epoll_create1(EPOLL_CLOEXEC)
- ├─ listen fd   : EPOLLIN (level-triggered), accept4(SOCK_NONBLOCK | SOCK_CLOEXEC) 루프
- ├─ conn fd     : EPOLLIN | EPOLLOUT | EPOLLONESHOT | EPOLLRDHUP  (필요 시 re-arm)
- └─ eventfd     : Post() 작업 / 종료 wake-up
+ ├─ listen fd   : EPOLLIN | EPOLLONESHOT, accept4(SOCK_NONBLOCK | SOCK_CLOEXEC) 루프 (wake 당 최대 64개) 후 re-arm
+ ├─ conn fd     : EPOLLONESHOT + 필요한 것만 (읽기 대기 중: EPOLLIN | EPOLLRDHUP, 쓰기 큐 있음: EPOLLOUT), 매번 re-arm
+ └─ eventfd     : EPOLLIN | EPOLLONESHOT, Post() 작업 / 종료 wake-up (re-arm)
 
 Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → completion 핸들러 호출
 ```
 
-- `EPOLLONESHOT` 로 한 연결의 이벤트가 동시에 두 워커에서 처리되지 않게 한다.
+- `EPOLLONESHOT` 로 한 연결(및 listen fd)의 이벤트가 동시에 두 워커에서 처리되지 않게 한다.
 - IOCP 와 같은 completion 스타일 인터페이스(`AsyncRead`, `AsyncWrite`)로 감싸 공통 서버 코드가 플랫폼을 모르게 한다.
 - `io_uring` 은 `IIoService` 의 선택적 구현으로 설계만 포함한다 (`SOCKGATE_WITH_IO_URING`, 현재 미구현).
 
@@ -85,7 +85,7 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 - 커널 keyring 은 재부팅 시 소멸하고 사용자 세션 범위라 **영속 키 저장소로 사용하지 않는다.**
 - 향후: File key store 의 복호화된 키 캐시 용도로만 검토 (현재 미구현, 문서화된 제한).
 
-## 4. Integrity (`LinuxPlatformSecurity`)
+## 4. Integrity (`integrity_linux.cpp`, `os::CollectIntegrityReport`)
 
 | 관측 | 방법 | flag |
 |---|---|---|
@@ -96,7 +96,7 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 | Tracer | `/proc/self/status` 의 `TracerPid != 0` | `DEBUGGER_PRESENT` |
 | ASLR | `randomize_va_space == 0`, `personality()` 의 `ADDR_NO_RANDOMIZE` (`setarch -R`, 디버거), 또는 실행 파일이 PIE 아님 (ELF `ET_EXEC`) | `ASLR_DISABLED` |
 | 실행 파일 권한 | group/other 쓰기 가능 | `EXECUTABLE_WRITABLE` |
-| 로드된 코드 | 실행 파일과 `.so` 목록(`dl_iterate_phdr`, 로더 lock 밖에서 검사): `/tmp/`·`/var/tmp/`·`/dev/shm/`·`/memfd:` 또는 world-writable 파일 | `UNEXPECTED_MODULES` |
+| 로드된 코드 | 실행 파일과 `.so` 목록(`dl_iterate_phdr`, 로더 lock 밖에서 검사): `/tmp/`·`/var/tmp/`·`/dev/shm/`·`/memfd:`·`/proc/` (예: `/proc/self/fd/N` 으로 dlopen 한 memfd) 또는 world-writable 파일 | `UNEXPECTED_MODULES` |
 | 해시 실패 | 파일을 읽지 못함 | `HASH_UNAVAILABLE` |
 
 파일 해시는 프로세스당 1회 계산해 캐시하고, 나머지 관측은 인증마다 다시 평가한다. 모든 관측은 우회 가능하며
@@ -107,8 +107,8 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 | 플래그 | 목적 |
 |---|---|
 | `-fstack-protector-strong` | stack canary |
-| `-D_FORTIFY_SOURCE=3` (Release, `-O2` 이상; GCC < 12 는 2) | libc 경계 검사 |
-| `-fPIC` / `-fPIE -pie` | ASLR |
+| `-D_FORTIFY_SOURCE=3` (Release/RelWithDebInfo/MinSizeRel, sanitizer 빌드 제외; GCC ≥ 12 또는 Clang ≥ 16, 그 밖은 2. 수준 3 이 실제로 적용되려면 glibc ≥ 2.34 — 그 미만 glibc 는 2 로 동작) | libc 경계 검사 |
+| `CMAKE_POSITION_INDEPENDENT_CODE=ON` (`-fPIC` / `-fPIE`) + 실행 파일 링크 `-pie` | ASLR |
 | `-Wl,-z,relro,-z,now` | Full RELRO |
 | `-Wl,-z,noexecstack` | NX stack |
 | `-fcf-protection=full` (x86_64) / `-mbranch-protection=standard` (ARM64) | CET / BTI+PAC |
@@ -116,10 +116,17 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 | `-fvisibility=hidden -fvisibility-inlines-hidden` | export 최소화 |
 | `-Wl,--version-script=cmake/sockgate_exports.map` (`SG_*` 만 global) | 약한 C++ 템플릿 심볼까지 비노출. CTest `sg_exports_*` 가 `nm -D` 로 검증 |
 | `-Wl,--exclude-libs,ALL` | 정적 링크한 OpenSSL 심볼 비노출 |
-| Release: `-s` 또는 `strip --strip-unneeded` | 심볼 제거 |
-| `-Wall -Wextra -Wconversion -Wshadow -Wformat=2` | 경고 |
+| Release/MinSizeRel: 링크 `-s` (테스트용이 아닌 공유 라이브러리에만) | 심볼 제거 |
+| `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wformat=2 -Wcast-qual -Wnull-dereference -Wdouble-promotion -Wimplicit-fallthrough` (`SOCKGATE_WERROR` 면 `-Werror`) | 경고 |
+
+stack protector, `_FORTIFY_SOURCE`, stack clash, CET/BTI, `-pie`, RELRO/noexecstack, `--exclude-libs`, `-s` 는
+`SOCKGATE_HARDENING`(기본 ON) 일 때만 붙는다 (링크 플래그는 공유 라이브러리/실행 파일에만). 조건 없이 적용되는 것은
+visibility(CMake `*_VISIBILITY_PRESET hidden`), 공유 라이브러리의 version script, `CMAKE_POSITION_INDEPENDENT_CODE`,
+경고 플래그이다 (`cmake/SockGateCompilerFlags.cmake`).
 
 ## 6. 런타임 검증
 
 - `linux-*-asan` (ASan + UBSan), `linux-clang-tsan` (TSan), `linux-clang-fuzz` (libFuzzer + ASan) 프리셋.
+  sanitizer test 프리셋은 CI 와 같은 `ASAN_OPTIONS` / `UBSAN_OPTIONS`(`halt_on_error=1`) / `TSAN_OPTIONS` 로 실행된다
+  (숨은 `test-sanitizers` 프리셋).
 - 컨테이너 CI: Ubuntu 22.04/24.04, Debian 12, Rocky 9 (`.github/workflows/ci.yml`).

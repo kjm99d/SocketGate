@@ -49,7 +49,7 @@
 | 후보 | 사용하지 않는 이유 |
 |---|---|
 | Boost.Asio | 의존성 규모. IOCP/epoll 을 직접 얇게 구현 |
-| libsodium | OpenSSL 로 필요한 AEAD/서명/KDF 모두 충족. 필요 시 `ICryptoProvider` 구현으로 추가 가능 |
+| libsodium | OpenSSL 로 필요한 AEAD/서명/KDF 모두 충족. 필요 시 `crypto/crypto.h` 의 다른 구현(현재 `openssl_crypto.cpp`)으로 추가 가능 |
 | mbedTLS | 1차 범위는 OpenSSL 단일 backend. `ITlsProvider` 로 확장 가능 |
 | GoogleTest | 테스트 의존성 최소화 |
 | JSON 라이브러리 | wire format 은 바이너리 |
@@ -60,3 +60,5 @@
 - OpenSSL 3.0 에서 사용 불가한 API 는 사용하지 않는다 (예: 3.2+ 전용 API 사용 시 `OPENSSL_VERSION_NUMBER` 분기).
 - TLS 1.3 cipher suite 는 OpenSSL 기본값(`TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256`)을 명시적으로 설정.
 - TLS 1.2 옵션 사용 시 `ECDHE-ECDSA/RSA-AES-GCM`, `ECDHE-*-CHACHA20-POLY1305` 만 허용, 재협상/압축 비활성.
+- OpenSSL security level 은 설정하지 않는다 (`SSL_CTX_set_security_level` 호출 없음). 사용하는 OpenSSL 의 기본값
+  (버전과 빌드/배포판 설정에 따름)이 적용된다. 허용 프로토콜·cipher suite 는 위 목록으로 고정된다.

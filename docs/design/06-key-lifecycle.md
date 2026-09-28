@@ -4,7 +4,7 @@
 
 | 키 | 소유 | 알고리즘 | 저장 | 수명 |
 |---|---|---|---|---|
-| Installation key | 클라이언트 | ECDSA P-256 | IKeyStore (CNG/TPM, TPM2, keyring, file) | installation 수명, 교체 가능 |
+| Installation key | 클라이언트 | ECDSA P-256 | IKeyStore (CNG/TPM, TPM2, file) | installation 수명, 교체 가능 |
 | Installation ID | 클라이언트 | `SHA-256("SockGate/v1/iid" ‖ SEC1 공개키)[0..16)` | 공개키에서 매번 유도 | 키 수명 |
 | 서버 TLS 키 / 인증서 | 서버 | ECDSA/RSA (TLS 정책) | PEM 파일 (배포 환경 보호) | 인증서 유효기간 |
 | 서버 proof key (선택) | 서버 | ECDSA P-256 | PEM 파일 | 운영 정책 |
@@ -40,7 +40,8 @@ installation_id 를 공개키에서 유도하므로 (1) 별도 메타데이터 �
 ### 2.2 등록 (서버에 공개키 알리기)
 
 1. **Enrollment token** (권장): 서버가 발급한 1회용 token 으로 `SG_Client_Enroll()` → 서버가 공개키 등록.
-2. **Out-of-band**: `SG_Client_ExportPublicKey()` 로 얻은 SEC1 공개키를 관리자가 `SG_Server_RegisterClient()` 로 등록.
+2. **Out-of-band**: `SG_Client_EnsureIdentity()` / `SG_Client_GetIdentity()` 가 채우는 `SG_IdentityInfo.public_key`
+   (SEC1 공개키)를 관리자가 `SG_Server_RegisterClient()` 로 등록. (별도 `SG_Client_ExportPublicKey()` 는 두지 않았다.)
 
 private key 는 어떤 경로로도 서버에 전송되지 않는다.
 
@@ -97,7 +98,9 @@ AUTO 규칙:
   에 키를 만든 저장소를 기록한다. 위치: Linux 는 key 디렉터리, Windows 는 CNG 키처럼 사용자 단위이므로
   `key_store_path` 와 무관하게 `%LOCALAPPDATA%\SockGate\keys`. 기록 후에는 **그 저장소만** 조회한다:
   - 저장소를 쓸 수 없음 (TPM provider 를 열 수 없음, fTPM 비활성) → `SG_KEYSTORE_ERROR` (나중에 재시도)
-  - 저장소는 동작하지만 키가 없음 (TPM clear 등) → `SG_IDENTITY_LOST`
+  - 저장소는 동작하지만 키가 없음 (키 파일·CNG 키 삭제 등) → `SG_IDENTITY_LOST`
+  - 저장소에 키는 있지만 쓸 수 없음 (예: TPM clear 뒤의 Linux TPM2 키 — blob 파일은 남는다) → 서명에서 `SG_KEYSTORE_ERROR`.
+    TPM clear/reset 뒤 계속되면 `SG_IDENTITY_DELETE_FORCE` 로 지우고 다시 등록한다.
   - 어느 경우에도 **새 identity 를 만들지 않는다**. 다른 저장소의 장애는 기록된 identity 에 영향을 주지 않는다.
 - locator 이전에 만든 키는 처음 조회될 때 기록된다.
 - 초기화: `SG_Client_DeleteIdentity` 는 키와 locator 를 지운다. 기록된 저장소를 쓸 수 없으면 키가 남을 수
@@ -129,7 +132,8 @@ Linux keyring 은 재부팅 시 소멸하므로 영속 저장소로 사용하지
 - TLS 인증서/키: `SG_ServerOptions.tls_cert_chain_file`, `tls_private_key_file` (또는 메모리 PEM).
 - 인증서 교체: 클라이언트 pin 에 **현재 키 + 다음 키**의 SPKI 해시를 미리 배포 → 서버 인증서 교체 → 구 pin 제거.
   (`PinnedKey[0..7]`)
-- 서버 proof key: 설정 시 AUTH_RESULT 에 서명. 클라이언트는 여러 개의 proof 공개키를 보유할 수 있다(교체 대비).
+- 서버 proof key: 설정 시 AUTH_RESULT(OK) 에 서명 (REJECTED / RETRY_LATER / UNSUPPORTED_VERSION 과 REAUTH_RESULT 는 서명하지
+  않는다). 클라이언트는 여러 개의 proof 공개키를 보유할 수 있다(교체 대비).
 
 ## 5. 세션 키
 
@@ -158,5 +162,7 @@ Linux keyring 은 재부팅 시 소멸하므로 영속 저장소로 사용하지
 | `K_tok = HMAC(server_token_key, …token_pub)` | token 문자열 안, 클라이언트 메모리 | 비밀, **전송 금지** |
 | `enroll_mac = HMAC(K_tok, …TH1)` | CLIENT_PROOF | 채널 결속된 증명 |
 
-- 사용된 `token_id` 는 registry 에 영구 기록된다 (만료 후에도 유지 — 만료 시각 이후 정리 가능).
+- 사용된 `token_id` 는 만료 시각과 함께 registry 에 영구 기록된다 (만료 후에도 유지). (v1 미구현: 만료 후 정리 — 기록은
+  삭제되지 않는다. 기록은 enrollment 로 등록된 installation 과 1:1 이고 installation 도 삭제되지 않으므로(폐기만)
+  기록 수는 등록된 installation 수를 넘지 않는다.)
 - token 문자열은 로그에 기록하지 않는다. 클라이언트는 enroll 후 token 문자열을 즉시 cleanse 한다.

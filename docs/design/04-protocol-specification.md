@@ -4,7 +4,7 @@
 
 - 전송: TLS 1.3 (옵션으로 TLS 1.2) 레코드 위의 바이트 스트림. **평문 TCP 로는 절대 전송하지 않는다.**
 - 바이트 순서: 모든 정수는 **Network Byte Order (Big Endian)**.
-- 직렬화 구현은 `SockGate_Common/src/serialization` 한 벌만 존재하며 Client/Server 가 공유한다.
+- 직렬화 구현은 `SockGate_Common/src/sockgate_common/serialization` 한 벌만 존재하며 Client/Server 가 공유한다.
 - JSON 등 텍스트 포맷은 wire protocol 로 사용하지 않는다.
 - 알 수 없는 enum 값, 예약 비트, 예약 필드 ≠ 0 은 모두 **프로토콜 오류**이다 (확장은 TLV 로만).
 - 모든 길이 필드는 상한이 정의되어 있으며 상한 초과는 헤더 단계에서 거부한다.
@@ -52,13 +52,15 @@
 
 ### 2.3 길이 상한
 
+상수는 내부 헤더 `sockgate_common/protocol/constants.h` 의 `sg::proto` 상수이다 (public C 헤더에는 없다).
+
 | 상수 | 값 | 적용 |
 |---|---|---|
-| `SG_FRAME_HEADER_SIZE` | 48 | |
-| `SG_MAX_HANDSHAKE_PAYLOAD` | 4096 | **인증 완료 전의 모든 프레임**(type 무관), REAUTH_*, PING/PONG/CLOSE |
-| `SG_DEFAULT_MAX_PAYLOAD` | 1 MiB | DATA (설정 가능) |
-| `SG_ABSOLUTE_MAX_PAYLOAD` | 16 MiB | 설정으로도 넘을 수 없는 컴파일 상수 |
-| `SG_AUTH_TAG_SIZE` | 16 | |
+| `kHeaderSize` | 48 | |
+| `kMaxHandshakePayload` | 4096 | **인증 완료 전의 모든 프레임**(type 무관), REAUTH_*, PING/PONG/CLOSE |
+| `kDefaultMaxPayload` | 1 MiB | DATA (설정 가능) |
+| `kAbsoluteMaxPayload` | 16 MiB | 설정으로도 넘을 수 없는 컴파일 상수 |
+| `kAuthTagSize` | 16 | |
 
 총 프레임 크기 = `48 + payload_length + auth_length`. 덧셈 전 `payload_length <= max` 를 먼저 검사하므로
 32bit/64bit 모두 overflow 가 발생하지 않는다 (디코더는 `size_t` 가 32bit 인 환경도 가정한다).
@@ -70,14 +72,20 @@
 3. `version != 1` → `SG_VERSION_MISMATCH` (연결 종료)
 4. `type` 미정의 → `SG_PROTOCOL_ERROR`
 5. `flags` 에 예약 비트 → `SG_PROTOCOL_ERROR`
-6. `reserved != 0` → `SG_PROTOCOL_ERROR`
-7. `auth_length ∉ {0, 16}` → `SG_PROTOCOL_ERROR`
-8. **헤더 단계 상태 검증** (본문을 버퍼링하기 전에): 현재 상태·방향에서 허용되는 `type` 인지, `auth_length` 요구 여부
-9. `payload_length > 상한` → `SG_PROTOCOL_ERROR`. 상한은 **연결 상태**로 결정한다:
-   인증 완료 전에는 type 과 무관하게 `SG_MAX_HANDSHAKE_PAYLOAD`, 인증 후 DATA 는 `max_payload`, 그 외 제어 메시지는 `SG_MAX_HANDSHAKE_PAYLOAD`
-10. 전체 프레임이 모일 때까지 대기
-11. 상태 머신 검증: session_id, sequence, request_id, `KEY_PHASE`
-12. auth tag 검증 (인증 후 프레임)
+6. `auth_length ∉ {0, 16}` → `SG_PROTOCOL_ERROR`
+7. `reserved != 0` → `SG_PROTOCOL_ERROR`
+8. `payload_length > kAbsoluteMaxPayload`(16 MiB) → `SG_PROTOCOL_ERROR` (상태와 무관한 구조 검사. 2–8 은 `DecodeHeader`)
+9. **헤더 단계 상태 검증** (`CheckHeaderForState`, 본문을 버퍼링하기 전에):
+   - 현재 상태·방향에서 허용되는 `type` 인지
+   - `auth_length` 가 상태와 맞는지 (인증 전 0, 인증 후 16)
+   - 인증 전: `flags == 0` 이고 `request_id == 0`
+   - 인증 후: `request_id != 0` 과 `RESPONSE` 는 DATA 에서만 허용, `RESPONSE` 면 `request_id != 0`
+10. `payload_length > 상한` → `SG_PROTOCOL_ERROR` (`CheckHeaderForState`). 상한은 **연결 상태**로 결정한다:
+   인증 완료 전에는 type 과 무관하게 `kMaxHandshakePayload`, 인증 후 DATA 는 `max_payload`, 그 외 제어 메시지는 `kMaxHandshakePayload`
+11. 전체 프레임이 모일 때까지 대기
+12. 상태 머신 검증. 인증 전 프레임은 핸드셰이크 코드가 session_id / sequence 를 검사한다. 인증 후 프레임은
+    `ProtectedChannel::Open` 이 session_id → sequence → `KEY_PHASE`(키 선택) → auth tag → request_id 순으로 검사한다
+    (request_id 규칙은 tag 로 진위를 확인한 뒤)
 13. payload 디코드 (메시지별 엄격 파서)
 
 ## 3. Message Types
@@ -156,6 +164,8 @@ u8       server_proof_algorithm    (0 = 없음, 1 = ECDSA_P256_SHA256)
 TLV      extensions                (v1 정의 없음)
 ```
 
+`selected_protocol_version` 과 `challenge_ttl_ms` 는 0 이 아니어야 한다 (0 이면 프로토콜 오류).
+
 ### 5.3 CLIENT_PROOF (0x03)
 
 ```text
@@ -183,7 +193,11 @@ vec16    server_signature          (algorithm=0 이면 길이 0, 1 이면 64)
 ```
 
 `result != OK` 이면 나머지 필드는 0 이어야 하며 서버는 전송 직후 연결을 닫는다.
+`result == OK` 이면 `session_policy != NONE` 이고 `session_lifetime_ms != 0` 이어야 한다 (위반은 프로토콜 오류).
 네트워크로는 거부 사유의 세부 내용을 보내지 않는다.
+
+(v1 미구현: 서버의 RETRY_LATER 송신 — 과부하(`max_connections` / `max_unauthenticated` 초과) 연결은 accept 직후
+응답 없이 닫는다. 클라이언트는 수신한 REJECTED 와 RETRY_LATER 를 모두 `SG_SERVER_REJECTED` 로 반환한다.)
 
 ### 5.5 INTEGRITY_REPORT (TLV 5)
 
@@ -201,9 +215,12 @@ vec16    build_id                  (≤ 64)
 ### 6.1 채널 바인딩
 
 ```text
-channel_binding = TLS-Exporter(label = "EXPORTER-Channel-Binding", no context, length = 32)   // RFC 9266
-                = SSL_export_keying_material(ssl, out, 32, "EXPORTER-Channel-Binding", 24, NULL, 0, use_context = 0)
+channel_binding = TLS-Exporter(label = "EXPORTER-Channel-Binding", zero-length context, length = 32)   // RFC 9266
+                = SSL_export_keying_material(ssl, out, 32, "EXPORTER-Channel-Binding", 24, "", 0, use_context = 1)
 ```
+
+"context 없음"(`use_context = 0`)이 아니라 **길이 0 context**(`use_context = 1`)이다. TLS 1.3 에서는 두 값이 같지만
+TLS 1.2 에서는 다르다 — 이 방식 이전에 빌드된 peer 와는 TLS 1.2(allow_tls12) 로 협상하면 인증이 실패한다.
 
 클라이언트와 서버는 각자 **자기 쪽 TLS 연결**에서 값을 계산한다.
 중간자가 TLS 를 두 번 종단하면 양쪽 값이 달라지므로 클라이언트 서명이 서버에서 검증되지 않는다.
@@ -244,8 +261,10 @@ server_signed_data = "SockGate/v1/server-proof" || 0x00 || TH2
 
 - 헤더의 `payload_length` 는 서명 필드를 포함한 최종 길이이므로 R 은 결정적이다.
 - SERVER_HELLO 와 AUTH_RESULT 의 `server_proof_algorithm` 은 같아야 한다.
-- 클라이언트에 `server_proof_keys` 가 설정되어 있으면 서버가 무엇을 광고하든 서명을 **요구**한다.
+- 클라이언트에 `server_proof_keys` 가 설정되어 있으면 서버가 무엇을 광고하든 AUTH_RESULT(OK) 에 서명을 **요구**한다.
   서명이 없거나 검증 실패 시 `SG_INVALID_SIGNATURE` 로 연결을 끊는다 (알고리즘 필드로 인한 downgrade 불가).
+  REJECTED / RETRY_LATER / UNSUPPORTED_VERSION 은 서명 없이 오며 서명 검사 전에 처리된다: 가짜 서버도 이 결과는 만들 수 있으므로
+  이를 서버 신원의 증거로 쓰지 않는다 (가짜 서버에 주장을 보내지 않게 하는 것은 인증서 검증과 pinning 이다).
 
 ## 7. 세션 키와 프레임 보호
 
@@ -295,9 +314,9 @@ k_sc = HKDF-SHA256(ikm = km, salt = session_id, info = "SockGate/v1 s2c" || u32(
 | DATA | 애플리케이션 바이트 (0..max_payload) |
 | PING / PONG | `u64 opaque` (PONG 은 PING 값을 그대로 반환) |
 | REAUTH_REQUEST | `bytes32 client_nonce` |
-| REAUTH_CHALLENGE | `bytes32 server_nonce`, `bytes32 challenge`, `u32 challenge_ttl_ms` |
+| REAUTH_CHALLENGE | `bytes32 server_nonce`, `bytes32 challenge`, `u32 challenge_ttl_ms` (0 이면 프로토콜 오류) |
 | REAUTH_PROOF | `u8 signature_algorithm`, `vec16 signature` |
-| REAUTH_RESULT | `u8 result`, `u32 session_lifetime_ms`, `u32 new_epoch` |
+| REAUTH_RESULT | `u8 result`, `u32 session_lifetime_ms`, `u32 new_epoch`. `result` 는 UNSUPPORTED_VERSION 일 수 없고, OK 면 `session_lifetime_ms != 0`, OK 가 아니면 나머지 두 필드는 0 |
 | CLOSE | `u16 reason` (0 NORMAL, 1 PROTOCOL_ERROR, 2 AUTH_FAILED, 3 SESSION_EXPIRED, 4 SERVER_SHUTDOWN, 5 IDLE_TIMEOUT, 6 LIMIT_EXCEEDED) |
 
 재인증 transcript:
@@ -313,7 +332,8 @@ signed = "SockGate/v1/reauth-proof" || 0x00 || THr
 - `prev_TH` 는 직전 인증의 transcript 해시(TH1 또는 이전 THr).
 - REAUTH_RESULT(OK) 는 epoch e 키로 보호되며, 키 전환은 §7.3 규칙을 따른다.
 - 클라이언트는 `new_epoch == epoch + 1` 을 확인한다.
-- 서버는 세션당 재인증 빈도를 제한한다 (기본: 직전 재인증 후 10 s 이내 요청 거부 → CLOSE(PROTOCOL_ERROR)).
+- 서버는 세션당 재인증 빈도를 제한한다 (기본: 세션 시작 또는 직전에 받아들인 REAUTH_REQUEST 후 10 s 이내의 요청 거부
+  → CLOSE(PROTOCOL_ERROR)).
 
 ## 9. Sequence / Request ID 규칙
 
@@ -324,6 +344,7 @@ signed = "SockGate/v1/reauth-proof" || 0x00 || THr
 | 요청(`RESPONSE` 미설정, `request_id != 0`)의 `request_id` 는 방향별 단조 증가 | `SG_REPLAY_DETECTED` (Duplicate Request) |
 | 응답(`RESPONSE` 설정)은 `request_id != 0` 이며 수신측이 보낸 최대 요청 ID 이하 | `SG_PROTOCOL_ERROR` |
 | 인증 전 프레임 session_id: ClientHello 는 0, 이후 모두 할당된 값 | `SG_PROTOCOL_ERROR` |
+| 인증 전 프레임은 `request_id == 0`. 인증 후 `request_id != 0` / `RESPONSE` 는 DATA 에서만 (§2.4) | `SG_PROTOCOL_ERROR` |
 
 프로토콜 오류, tag 오류, sequence 오류는 모두 **연결 종료**로 처리한다(오류 후 계속 진행하지 않는다).
 

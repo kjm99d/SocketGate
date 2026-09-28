@@ -56,7 +56,15 @@ A7 은 **완전한 방어 대상이 아니다**. 비용을 높이는 것이 목�
 
 ### 3.3 Repudiation
 
-- 서버는 인증 성공/실패, 세션 생성/종료를 구조화 로그로 남긴다(`timestamp, session_id, installation_id, message_type, sequence, error_code, connection_state`).
+- 서버는 인증 성공/실패, 세션 생성/종료를 구조화 로그로 남긴다. 형식은 로그 콜백으로 전달되는 `key=value` 이벤트이다:
+  `ts=<Unix ms> event=<이름>` 뒤에 이벤트별 필드 (`session=`, `installation=` 은 ID 앞 8 bytes 의 hex, `peer=`,
+  `err=`/`status=` 는 `SG_*` 이름, `reason=`).
+  로그는 `SG_ServerOptions.log_callback` 이 설정되어야 남고, 감사 용도로는 `log_level >= SG_LOG_INFO` 가 필요하다. 기본값
+  `SG_LOG_WARN` 에서는 INFO 이벤트인 `session_opened` / `session_closed` / `session_refreshed`, CLIENT_HELLO 단계(버전
+  불일치)의 `auth_rejected`, `tls_failed`, `handshake_timeout` 이 기록되지 않는다 (CLIENT_PROOF 단계의 `auth_rejected`,
+  `reauth_rejected`, `frame_rejected`, `connection_refused` 는 WARN).
+  (v1 미구현: 모든 이벤트에 공통인 `message_type, sequence, connection_state` 필드 — `type=`/`seq=` 는 `frame_rejected`,
+  `phase=` 는 `connection_error`/`handshake_timeout` 이벤트에만 있다.)
 - 서명 자체는 부인방지 목적의 증거로 저장하지 않는다(범위 밖).
 
 ### 3.4 Information Disclosure
@@ -73,7 +81,7 @@ A7 은 **완전한 방어 대상이 아니다**. 비용을 높이는 것이 목�
 
 | 위협 | 대응 |
 |---|---|
-| 대량 연결 | `max_connections`, 핸드셰이크 타임아웃, 미인증 연결 수 상한 |
+| 대량 연결 | `max_connections`, 핸드셰이크 타임아웃, 미인증 연결 수 상한 `SG_ServerOptions.max_unauthenticated` (0 = `max_connections / 2`, 최소 1, `max_connections` 이하). 상한을 넘는 연결은 accept 직후 닫는다. 인증 전에 실패한 연결은 graceful close 가 끝날 때까지 자리를 차지한다 |
 | 거대 프레임 | 헤더 단계에서 `payload_length` 상한 검사 (핸드셰이크 4 KiB, 데이터 기본 1 MiB, 절대 상한 16 MiB) |
 | 느린 전송 (slowloris) | 핸드셰이크 전체 타임아웃, idle 타임아웃 |
 | 서명 검증 CPU 소모 | 연결당 최초 인증 1회, 재인증 최소 간격 10 s, enrollment 는 저렴한 HMAC 검사를 서명 검증보다 먼저 수행 |

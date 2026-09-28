@@ -154,19 +154,29 @@ Client (Active)                                                            Serve
 - 재인증 시점에 installation 폐기, 라이선스 만료가 다시 확인된다. 단, 폐기/라이선스 폐기는 재인증을 기다리지 않고
   `SG_Server_RevokeClient` / `SG_Server_RevokeLicense` 호출 즉시 해당 세션을 종료한다 (07 §4).
 - 서버는 세션당 재인증 빈도를 제한한다 (최소 간격 10 s).
-- 클라이언트는 `session_lifetime` 의 80% 경과 시 자동 재인증을 시도할 수 있다(설정 `auto_refresh`).
+- 클라이언트는 `session_lifetime` 의 80% 경과 시 자동 재인증을 시도할 수 있다(`SG_ClientConfig.flags` 의 `SG_CLIENT_FLAG_AUTO_REFRESH`).
 
 ## 4. 타임아웃
 
 | 항목 | 기본값 | 범위 | 초과 시 |
 |---|---|---|---|
-| TCP connect | 10 s | 100 ms – 120 s | `SG_TIMEOUT` |
+| 클라이언트 Connect 전체 (`connect_timeout_ms`: 시스템 proxy 조회 + 이름 해석 + TCP + proxy 협상 + TLS) | 10 s | 100 ms – 120 s | `SG_TIMEOUT` |
 | Proxy 협상 | connect 타임아웃에 포함 | | `SG_TIMEOUT` / `SG_PROXY_ERROR` |
-| TLS handshake | 10 s | | `SG_TIMEOUT` |
+| TLS handshake | connect 타임아웃의 남은 시간 | | `SG_TIMEOUT` |
+| 클라이언트 Authenticate / Enroll / Refresh (`io_timeout_ms`, 0 = 무한) | 30 s | | `SG_TIMEOUT` |
 | 서버: 연결 수락 → AUTH_RESULT | 15 s | 1 – 120 s | 연결 종료 |
 | challenge TTL | 30 s | 1 – 300 s | REJECTED |
 | 세션 수명 | 1 h | 1 min – 7 d | CLOSE(SESSION_EXPIRED) |
 | idle | 5 min | 0(off) – 1 d | CLOSE(IDLE_TIMEOUT) |
+
+(v1 미구현: 범위 검사 — 클라이언트는 범위를 검사하지 않는다 (`connect_timeout_ms` 0 = 기본값). 서버는 세션 수명 ≤ 7 d
+(초과 설정은 `SG_INVALID_ARGUMENT`, `on_authorize` 가 준 수명은 7 d 로 자름)와 `max_payload_size` ≤ 16 MiB 만 검사하고,
+나머지는 0 을 기본값(idle 은 off)으로 바꿀 뿐이다.)
+
+- 이름 해석과 시스템 proxy 조회에 쓴 시간도 connect 예산에 포함되고, 예산이 다 되면 다음 단계를 시작하지 않는다.
+  단, 진행 중인 resolver 호출(`getaddrinfo`) 하나는 중단할 수 없다 (13 §7).
+- 다른 스레드의 `SG_Client_Disconnect` 가 진행 중인 Connect 를 중단하면 어느 단계에서든 Connect 는 `SG_CLOSED` 를
+  반환한다 (`event=connect_aborted`). 이미 발생한 인증서/pinning 실패는 그대로 `SG_CERTIFICATE_ERROR` / `SG_PINNING_ERROR`.
 
 ## 5. 실패 처리 표
 
@@ -180,6 +190,6 @@ Client (Active)                                                            Serve
 | TLS | TLS 1.2 협상 + EMS 미지원 | 종료 | `SG_TLS_ERROR` |
 | Proof | 서명/미등록/폐기/만료 challenge | AUTH_RESULT(REJECTED) | `SG_SERVER_REJECTED` |
 | Proof | 권한 거부 | AUTH_RESULT(REJECTED) | `SG_SERVER_REJECTED` |
-| Proof | 서버 과부하 | AUTH_RESULT(RETRY_LATER) | `SG_SERVER_REJECTED` (재시도 가능) |
+| Proof | 서버 과부하 | AUTH_RESULT(RETRY_LATER) (v1 미구현: 서버는 보내지 않고, `max_connections` / `max_unauthenticated` 초과 연결을 accept 직후 닫는다) | `SG_SERVER_REJECTED` (재시도 가능. 클라이언트는 REJECTED 와 RETRY_LATER 를 구분하지 않음). accept 직후 닫힌 연결은 `SG_Client_Connect` 가 `SG_TLS_ERROR` / `SG_NETWORK_ERROR` |
 | Result | server proof 누락/오류 | - | `SG_INVALID_SIGNATURE` |
 | 전체 | 타임아웃 | 종료 | `SG_TIMEOUT` |

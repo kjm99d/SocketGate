@@ -35,11 +35,11 @@ Client/Server 의 동명 디렉터리에는 역할별 코드만 둔다.
 |---|---|---|---|
 | 직렬화 / 프레임 / 메시지 | 전부 | - | - |
 | 암호 프리미티브 (SHA-256, HKDF, AES-GCM, ECDSA verify, RNG) | 전부 | - | - |
-| TLS 엔진 (memory BIO, sans-IO) | 전부 | 클라이언트 컨텍스트/검증/pinning | 서버 컨텍스트/인증서 로드 |
-| 소켓 기본 기능 | 플랫폼별 socket, 주소 해석 | 블로킹+타임아웃 연결, proxy connector | IOCP / epoll IoService, Listener |
-| 인증 | transcript, 서명 포맷 | IKeyStore 구현 (CNG, File, TPM2 등) | Authenticator, ClientRegistry |
-| 세션 | 채널 보호(AEAD), sequence 검증 | ClientSession 상태 머신 | SessionManager, Connection |
-| 정책 | - | Integrity 수집 | Authorizer, License, Integrity 정책 |
+| TLS 엔진 (memory BIO, sans-IO) | 전부 (클라이언트/서버 컨텍스트, 인증서 검증/pinning, 인증서 로드 포함) | `TlsChannel` (엔진 ↔ transport 연결) | - (Common 의 서버 컨텍스트 사용) |
+| 소켓 기본 기능 | 플랫폼별 socket, 주소 해석 (`platform/socket.h`) | 블로킹+타임아웃 연결, proxy connector | IOCP / epoll `IIoService` + `AsyncStream` (listen/accept 포함) |
+| 인증 | transcript, 서명 포맷 | IKeyStore 구현 (CNG, File, TPM2 등) | `ServerHandshake`, ClientRegistry |
+| 세션 | `ProtectedChannel` (AEAD + sequence/request id 검증) | ClientSession 상태 머신 | `ServerEngine` (연결 표, 상한, sweeper), `Connection` |
+| 정책 | - | Integrity 수집 | `BuiltinAuthorizer` (License, Integrity 정책) + `on_authorize` |
 
 ## 3. 계층 구조
 
@@ -52,16 +52,16 @@ Client/Server 의 동명 디렉터리에는 역할별 코드만 둔다.
                               |
      +------------------------+-------------------------+
      |                   SockGate Core                   |
-     |  Client: ClientSession                            |
-     |  Server: ServerEngine / SessionManager /          |
-     |          Authenticator / Authorizer / Dispatcher  |
+     |  Client: ClientSession / IKeyStore                |
+     |  Server: ServerEngine / Connection /              |
+     |          ServerHandshake / BuiltinAuthorizer      |
      +------------+----------------------+---------------+
                   |                      |
         Common Security            Protocol (Common)
-        - ICryptoProvider           - FrameHeader codec
-        - IKeyStore                 - Message codecs (TLV)
-        - ChannelProtector(AEAD)    - Transcript
-        - SPKI pin                  - Sequence / RequestId window
+        - crypto.h (free fn)        - FrameHeader codec
+        - ProtectedChannel(AEAD)    - Message codecs (TLV)
+        - SPKI pin                  - Transcript
+                                    - Sequence / RequestId (ProtectedChannel)
                   |                      |
                   +----------+-----------+
                              |
@@ -75,14 +75,14 @@ Client/Server 의 동명 디렉터리에는 역할별 코드만 둔다.
                        Platform Layer
                  /                         \
             Windows                        Linux
-      Winsock2, WSAPoll, IOCP        POSIX socket, poll, epoll
-      CNG / NCrypt / DPAPI / TPM     File keystore, keyring, TPM2-TSS
+      Winsock2, select, IOCP         POSIX socket, poll, epoll
+      CNG / NCrypt / DPAPI / TPM     File keystore, TPM2-TSS
       WinVerifyTrust, PSAPI          /proc, dl_iterate_phdr, ELF
 ```
 
 ### 3.1 공통 코드 규칙
 
-- `src/platform/windows`, `src/platform/linux` (Linux 는 POSIX 공통 부분을 `posix` 로 둔다) 외부에서는
+- `src/platform/windows`, `src/platform/linux` (별도 `posix` 디렉터리는 없다. POSIX 코드도 `linux` 아래에 둔다, 예: `socket_posix.cpp`) 외부에서는
   OS 헤더(`windows.h`, `sys/socket.h`, `sys/epoll.h` 등)를 include 하지 않는다.
 - OS 기능은 다음 추상화로만 접근한다.
 
@@ -91,8 +91,10 @@ class ITransport;        // 클라이언트 바이트 스트림 (Connect/Send/Re
 class IIoService;        // 서버 비동기 I/O (IOCP / epoll)
 class ITlsProvider;      // TLS 컨텍스트 팩토리 (OpenSSL 구현 1개)
 class IKeyStore;         // 비대칭 키 저장/서명 (CNG, File, TPM2 ...)
-class ICryptoProvider;   // hash / hkdf / aead / verify / random
-class IPlatformSecurity; // integrity 관측, 보안 저장소 가용성
+// ICryptoProvider 는 두지 않았다: hash / hkdf / aead / verify / random 은 crypto/crypto.h 의 자유 함수이며
+// 구현은 빌드 시 선택된다 (openssl_crypto.cpp).
+// IPlatformSecurity 는 두지 않았다: integrity 관측은 클라이언트 platform/integrity.h 의
+// os::CollectIntegrityReport() (플랫폼별 .cpp) 이다.
 ```
 
 ## 4. TLS 엔진 설계 (sans-IO)
@@ -116,32 +118,36 @@ TLS 는 OpenSSL 의 memory BIO 로 구동한다. 소켓을 OpenSSL 에 직접 �
 
 - 공개 API 는 **동기(blocking) + 타임아웃** 모델이다. 임베딩 대상 애플리케이션이 자체 스레드 모델을 가지므로
   라이브러리가 내부 스레드를 만들지 않는다.
-- 소켓은 non-blocking 으로 열고 `WSAPoll` / `poll` 로 타임아웃을 구현한다.
+- 소켓은 non-blocking 으로 열고 `select`(Windows, 10 §1.2) / `poll`(Linux) 로 타임아웃을 구현한다.
 - 동시성 규칙:
   - `Send` 와 `Receive` 는 서로 다른 스레드에서 동시에 호출할 수 있다.
   - 같은 방향의 동시 호출(`Send` 2개)은 내부 mutex 로 직렬화된다.
   - `Disconnect` 는 다른 스레드에서 진행 중인 `Send`/`Receive` 를 깨운다(`shutdown`).
-  - `Destroy` 는 다른 호출과 동시에 호출하면 안 된다(C API 계약). 내부적으로는 in-flight 카운터로 방어한다.
+  - `Destroy` 는 다른 호출과 동시에 호출하면 안 된다(C API 계약). (v1 미구현: 핸들 수준 in-flight 카운터 방어 —
+    `Destroy` 는 `Disconnect` 로 진행 중인 Send/Receive 를 깨우고 그 mutex 가 풀릴 때까지 기다린 뒤 해제할 뿐, 이후 들어오는
+    호출은 막지 못한다. in-flight 카운터는 `TcpTransport` 에만 있다(진행 중 I/O 가 끝난 뒤 소켓 close).)
 - OpenSSL `SSL` 객체는 스레드 안전하지 않으므로 `SSL_*` 호출은 하나의 TLS mutex 아래에서만 수행하고,
   실제 네트워크 I/O 는 TLS mutex 밖에서 수행한다. 송신 레코드 순서는 TLS mutex 안에서 큐에 적재한 순서로 보장된다.
 
 ## 6. 서버 실행 모델
 
 ```text
-Listener (accept)
+IIoService          ── listen + accept (IOCP / epoll 구현 안에 있음)
     ↓
-ConnectionManager   ── 연결 수 제한, 핸드셰이크 타임아웃, 연결 ID 발급
+ServerEngine        ── 연결 수 제한(max_connections, max_unauthenticated), handle 발급, handle → Connection 표,
+                       sweeper (각 Connection::Tick: 핸드셰이크 타임아웃, challenge/세션 만료, idle)
     ↓
-Connection          ── TLS 엔진 + FrameDecoder + 상태 머신 (연결당 1개, 독립 상태)
+Connection          ── TLS 엔진 + FrameDecoder + ProtectedChannel + 상태 머신 (연결당 1개, 독립 상태),
+                       DATA → on_message, PING/PONG, REAUTH, CLOSE 분기
     ↓
-SessionManager      ── session_id ↔ connection, 만료/idle sweep
+ServerHandshake     ── ClientHello/ClientProof 검증, ClientRegistry 조회, enrollment
     ↓
-Authenticator       ── ClientHello/ClientProof 검증, ClientRegistry 조회
-    ↓
-Authorizer          ── 제품/라이선스/기능/무결성 정책 + 애플리케이션 콜백
-    ↓
-Dispatcher          ── DATA → on_message, PING/PONG, REAUTH, CLOSE
+BuiltinAuthorizer   ── 제품/라이선스/기능/무결성 정책 + 애플리케이션 콜백 (on_authorize)
 ```
+
+설계 초안의 Listener / ConnectionManager / SessionManager / Authenticator / Dispatcher 는 별도 클래스로 두지 않았다.
+accept 는 `IIoService`, 연결 관리와 sweep 은 `ServerEngine`, 인증은 `ServerHandshake`, 메시지 분기는 `Connection` 이 맡는다
+(Common 의 `proto::MessageDispatcher` 는 tests/fuzz 에서만 쓰인다).
 
 - I/O: Windows **IOCP** (AcceptEx, WSARecv, WSASend overlapped), Linux **epoll** (non-blocking, `EPOLLONESHOT`).
   둘 다 `IIoService` 뒤에 숨긴다. `io_uring` 은 향후 `IIoService` 의 추가 구현으로 붙일 수 있게 한다(현재 미구현).
@@ -168,7 +174,7 @@ TLS 1.3 (TLS 1.2 는 명시적 옵션)
 + 방향별 엄격한 sequence + request id 단조 증가
 + 프레임 단위 AES-256-GCM tag (선택적으로 payload 암호화)
 + 서버측 권한 판단 (제품/라이선스/기능/무결성)
-+ (선택) OS 보안 키 저장소 (CNG/TPM, TPM2, keyring)
++ (선택) OS 보안 키 저장소 (CNG/TPM, TPM2)
 + (선택) 클라이언트 integrity 보고 — 신뢰 **하향**에만 사용
 ```
 
@@ -180,16 +186,15 @@ TLS 1.3 (TLS 1.2 는 명시적 옵션)
 App buffer
   → ClientSession::Send
       → FrameHeader{type=DATA, session_id, seq=n+1, request_id, len}
-      → ChannelProtector::Seal (AES-256-GCM, AAD=header[+payload], 선택적 payload 암호화)
+      → ProtectedChannel::Seal (AES-256-GCM, AAD=header[+payload], 선택적 payload 암호화)
   → TlsEngine::Write (SSL_write → wbio)
   → Transport::Send
 ─────────── network ───────────
   → IoService completion → Connection::OnRead
   → TlsEngine::Feed / Read
   → FrameDecoder (헤더 검증, 길이 상한, overflow 검사)
-  → SequenceValidator (seq == expected, request id 단조 증가)
-  → ChannelProtector::Open (tag 검증 실패 → 즉시 연결 종료)
-  → Dispatcher → on_message(App callback)
+  → ProtectedChannel::Open (session_id → seq == expected → KEY_PHASE → tag → request id 단조 증가 — 실패 → 즉시 연결 종료)
+  → Connection → on_message(App callback)
 ```
 
 ## 9. 에러 처리 원칙
@@ -198,6 +203,7 @@ App buffer
 - 프로토콜 위반, tag 검증 실패, sequence 위반은 **복구하지 않고 연결을 종료**한다.
 - 네트워크로 되돌려 보내는 사유는 일반화된 코드(REJECTED, UNSUPPORTED_VERSION, RETRY_LATER, PROTOCOL_ERROR 등)만 사용한다.
   상세 사유는 서버 로그(민감값 제외)에만 남긴다.
+  (v1 미구현: RETRY_LATER 송신 — `max_connections` / `max_unauthenticated` 를 넘는 연결은 accept 직후 응답 없이 닫는다.)
 
 ## 10. 확장 지점
 

@@ -10,7 +10,7 @@
 - 열거형 값은 `uint32_t` 필드 + `#define` 상수로 전달한다 (컴파일러별 enum 크기 차이 회피).
 - 문자열은 NUL 종료 UTF-8. 길이 상한은 각 필드에 명시한다.
 - 라이브러리는 호출자에게 메모리를 할당해 넘기지 않는다. 출력은 호출자 버퍼로 복사한다.
-- 콜백은 라이브러리 내부 lock 을 보유하지 않은 상태에서 호출된다.
+- 콜백은 라이브러리 내부 lock 을 보유하지 않은 상태에서 호출된다 (예외: 로그 콜백, 서버 Stop/Destroy 중 콜백 — §5.3).
 - 모든 함수는 예외를 던지지 않는다 (내부 예외는 `SG_INTERNAL_ERROR`/`SG_OUT_OF_MEMORY` 로 변환).
 
 ## 2. 헤더 구성
@@ -47,7 +47,7 @@
 | 11 | `SG_PROTOCOL_ERROR` | 프로토콜 |
 | 12 | `SG_SERVER_REJECTED` | 인증/권한 |
 | 13 | `SG_SESSION_EXPIRED` | 세션 |
-| 14 | `SG_INTEGRITY_FAILED` | 무결성 |
+| 14 | `SG_INTEGRITY_FAILED` | 무결성 (v1 미구현: 정의만 되어 있고 반환되지 않는다. integrity 정책 거부는 서버가 REJECTED 로 응답하므로 클라이언트는 `SG_SERVER_REJECTED`) |
 | 15 | `SG_TIMEOUT` | 네트워크 |
 | 16 | `SG_INVALID_STATE` | API |
 | 17 | `SG_BUFFER_TOO_SMALL` | API |
@@ -62,7 +62,7 @@
 | 26 | `SG_CRYPTO_ERROR` | 암호 |
 | 27 | `SG_INTERNAL_ERROR` | 내부 |
 | 28 | `SG_STORAGE_ERROR` | 서버 저장소 |
-| 29 | `SG_IDENTITY_LOST` | identity 를 보관하던 key store 에 키가 더 이상 없음 (예: TPM clear). 삭제 후 재등록 필요 |
+| 29 | `SG_IDENTITY_LOST` | identity 를 보관하던 key store 에 키가 더 이상 없음 (키 삭제 등. Linux TPM2 키는 TPM clear 뒤에도 파일이 남아 서명에서 `SG_KEYSTORE_ERROR`). 삭제 후 재등록 필요 |
 
 값은 ABI 의 일부이며 변경하지 않는다. 새 코드는 끝에만 추가한다.
 
@@ -72,6 +72,9 @@
 void      SG_ClientConfig_Init(SG_ClientConfig* config);
 void      SG_ServerConfig_Init(SG_ServerConfig* server);
 void      SG_ProxyConfig_Init(SG_ProxyConfig* proxy);
+void      SG_IdentityInfo_Init(SG_IdentityInfo* info);
+void      SG_ClientSessionInfo_Init(SG_ClientSessionInfo* info);
+void      SG_MessageInfo_Init(SG_MessageInfo* info);
 
 SG_Status SG_Client_Create(const SG_ClientConfig* config, SG_Client** client);
 SG_Status SG_Client_Destroy(SG_Client* client);
@@ -80,6 +83,7 @@ SG_Status SG_Client_Destroy(SG_Client* client);
 SG_Status SG_Client_EnsureIdentity(SG_Client* client, SG_IdentityInfo* info /* nullable */);
 SG_Status SG_Client_GetIdentity(SG_Client* client, SG_IdentityInfo* info);
 SG_Status SG_Client_DeleteIdentity(SG_Client* client);
+SG_Status SG_Client_DeleteIdentityEx(SG_Client* client, uint32_t flags /* SG_IDENTITY_DELETE_FORCE */);  /* 06 §3 */
 
 /* connection */
 SG_Status SG_Client_Connect(SG_Client* client, const SG_ServerConfig* server);
@@ -101,13 +105,16 @@ SG_Status SG_Client_Ping(SG_Client* client);
 SG_Status SG_Client_GetState(SG_Client* client, uint32_t* state);
 SG_Status SG_Client_GetSessionInfo(SG_Client* client, SG_ClientSessionInfo* info);
 uint32_t  SG_Client_GetApiVersion(void);
+
+/* utility: PEM 의 첫 인증서에 대한 SHA-256 SPKI pin */
+SG_Status SG_Client_ComputeSpkiPin(const char* certificate_pem, size_t pem_size, SG_Sha256* pin);
 ```
 
 ### 4.1 동작 계약
 
 | 함수 | 계약 |
 |---|---|
-| `Create` | config 복사. 네트워크/키 저장소 접근 없음 |
+| `Create` | config 복사, 네트워크 접근 없음. key store 객체를 만든다: FILE/AUTO/TPM2 는 key(또는 locator) 디렉터리를 만들거나 검사하고 (Linux 는 오래된 임시 파일도 지운다), CNG 는 provider 를 열고(TPM 은 TPM 2.0 여부 조회), TPM2 는 `SOCKGATE_TPM2_TCTI` 를 읽는다. `SG_CLIENT_FLAG_INTEGRITY_REPORT` 면 실행 파일 해시를 미리 계산한다 |
 | `EnsureIdentity` | key store 에서 로드 또는 생성. `SG_CLIENT_FLAG_AUTO_IDENTITY` 면 Authenticate 가 자동 호출 |
 | `Connect` | TCP(+proxy) + TLS + 서버 검증까지. 실패 시 상태 `CLOSED`, 재호출 가능 |
 | `Authenticate` | `TLS_ESTABLISHED` 에서만. 성공 시 `ACTIVE` |
@@ -121,6 +128,13 @@ uint32_t  SG_Client_GetApiVersion(void);
 
 ```c
 void      SG_ServerOptions_Init(SG_ServerOptions* options);
+void      SG_ServerCallbacks_Init(SG_ServerCallbacks* callbacks);
+void      SG_ClientRecord_Init(SG_ClientRecord* record);
+void      SG_EnrollmentTokenRequest_Init(SG_EnrollmentTokenRequest* request);
+void      SG_LicenseRecord_Init(SG_LicenseRecord* record);
+void      SG_LicenseInfo_Init(SG_LicenseInfo* info);
+void      SG_ServerSessionInfo_Init(SG_ServerSessionInfo* info);
+void      SG_ServerStats_Init(SG_ServerStats* stats);
 
 SG_Status SG_Server_Create(const SG_ServerOptions* options, SG_Server** server);
 SG_Status SG_Server_Start(SG_Server* server);
@@ -171,7 +185,8 @@ typedef struct SG_LicenseRecord {
   2. registry 에 기록된 product/license 바인딩이 우선한다. 이와 **다른** 클라이언트 주장은 거부한다.
   3. 유효 라이선스 = registry 에 바인딩된 license_id (`SG_ClientRecord` 또는 enrollment token 의 것).
      바인딩이 없는 installation 이 주장한 license_id 는 **검증되지 않은 주장**(`SG_LICENSE_STATUS_UNKNOWN`)일
-     뿐이며 아무 권한도 주지 않는다. 존재하는 id 와 존재하지 않는 id 는 클라이언트에게 구분되지 않는다.
+     뿐이며 아무 권한도 주지 않는다. `SG_SERVER_OPT_LICENSE_ACTIVATION` 이 없으면 존재하는 id 와 존재하지 않는 id 는
+     클라이언트에게 구분되지 않는다 (활성화가 켜져 있으면 구분되므로 라이선스 id 는 추측할 수 없는 값이어야 한다).
   4. `SG_SERVER_OPT_LICENSE_ACTIVATION` 이면 바인딩 없는 installation 이 store 의 라이선스를 주장해
      **활성화**할 수 있다. 첫 활성화가 registry 에 영구 바인딩되며(first wins) 이후 다른 라이선스로 옮길 수 없다.
      이 모드에서 license id 는 bearer secret 이므로 추측 불가능하게 발급해야 한다 (로그에는 해시만 기록).
@@ -192,8 +207,11 @@ typedef struct SG_LicenseRecord {
 - 조건 변경(`AddLicense` 재호출)은 새 세션과 각 세션의 다음 재인증부터 적용된다. 즉시 차단은 `RevokeLicense`.
 - 폐기는 영구적이다. 폐기된 라이선스에 `AddLicense` 는 `SG_INVALID_STATE`. 폐기 내용을 저장하지 못하면
   메모리 상으로는 폐기 상태를 유지하고 세션도 종료한 뒤 `SG_STORAGE_ERROR` 를 반환한다 (I/O 오류가 폐기를 되돌리지 않음).
+  저장되지 않은 폐기는 기억되어, 폐기 함수를 다시 호출하면 쓰기를 재시도하고(`SG_OK` 가 될 때까지) 그 저장소의 이후
+  성공한 쓰기에도 함께 저장된다. `SG_Server_RevokeClient` (registry) 에도 같은 규칙이 적용된다.
 - `SG_ServerSessionInfo.license_id` 는 registry 바인딩 또는 검증된 라이선스만 보여준다 (클라이언트 주장 원문은 아님).
-  `license_status` 가 VALID/UNKNOWN 을 구분한다.
+  `license_status` 가 VALID/UNKNOWN 을 구분한다. 반면 `product_id` 는 installation 에 등록된 product 이고, 등록이 없으면
+  클라이언트 주장 그대로이다 (product_id 로 권한을 판단하는 애플리케이션은 주의).
 
 ### 5.2 Integrity 정책
 
@@ -241,8 +259,15 @@ typedef struct SG_ServerCallbacks {
 } SG_ServerCallbacks;
 ```
 
-- 콜백은 서버 워커 스레드에서 호출된다. 한 세션의 `on_message` 는 순서대로, 동시에 호출되지 않는다.
+- 콜백은 주로 서버 워커 스레드에서 호출되지만, 세션을 닫은 호출의 스레드(`SG_Server_CloseSession`, Revoke 계열,
+  `SG_Server_Stop`, 실패한 `SG_Server_Send`)와 내부 sweeper 스레드(만료, idle)에서도 호출된다.
+- 한 세션의 콜백은 순서대로, 동시에 호출되지 않는다. 예외: 재인증(클라이언트의 `SG_Client_Refresh`)의 `on_authorize` 는
+  그 순서 밖의 I/O 스레드에서 실행되어 같은 세션의 `on_message` / `on_session_closed` 와 겹칠 수 있다. 여기서 쓰는
+  세션별 데이터는 동기화해야 하고 실행 중에 해제하면 안 된다.
 - 서로 다른 세션의 콜백은 동시에 호출될 수 있다.
+- 로그 콜백은 예외적으로 내부 lock 을 잡은 채 호출될 수 있으므로 메시지 기록만 하고 SockGate 함수를 호출하면 안 된다.
+  `SG_Server_Stop` / `Destroy` 가 전달하는 콜백은 그 lifecycle lock 아래에서 호출된다 (그 세션의 이벤트를 이미 다른 스레드가
+  전달하고 있으면 그 스레드가 lock 없이 전달한다).
 - `on_authorize` 는 권한을 **축소하거나 거부**할 수 있고, 라이선스가 허용하지 않은 feature 를 추가할 수도 있다
   (서버 애플리케이션은 신뢰 주체이므로). 클라이언트가 보낸 값은 `request` 에 "주장" 으로만 전달된다.
 - 콜백에서 `SG_Server_Stop`/`Destroy` 호출은 금지 (`SG_INVALID_STATE`).
@@ -260,7 +285,9 @@ typedef struct SG_ServerCallbacks {
   필드를 추가할 때마다 올린다.
 - 공유 라이브러리는 헤더에 `SG_*_API` 로 선언된 함수만 정확히 export 한다 (CTest `sg_exports_*` 가 검증).
 - 구조체에는 끝에만 필드를 추가하고 `*_VERSION` 상수를 올린다. 라이브러리는 `size` 로 구 구조체를 인식한다.
-- 공유 라이브러리 SONAME/DLL 이름에 major 버전을 포함한다 (`libsockgate_client.so.1`, `sockgate_client.dll` + 리소스 버전).
+- 공유 라이브러리 SONAME 은 0.x 동안 `MAJOR.MINOR` (`libsockgate_client.so.0.1`, `libsockgate_server.so.0.1` — 0.x 는
+  minor 마다 ABI 가 바뀔 수 있음), 1.0 부터 `MAJOR` (`libsockgate_client.so.1`) 이다. Windows DLL 이름에는 버전을 넣지 않는다
+  (`sockgate_client.dll`, `sockgate_server.dll`). (v1 미구현: DLL 버전 리소스 — `.rc` 버전 정보를 넣지 않는다.)
 - Linux 는 `-fvisibility=hidden` + `SG_*_API` 로만 export, Windows 는 `__declspec(dllexport)` 로만 export 한다.
 
 ## 7. 사용 예

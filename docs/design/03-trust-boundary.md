@@ -3,7 +3,7 @@
 ```text
  ┌──────────────────────── Client Host (부분 신뢰, A7 에 의해 장악 가능) ───────────────────────┐
  │                                                                                             │
- │   Application ──TB4──▶ SockGate_Client ──TB5──▶ OS Key Store (CNG/TPM, TPM2, keyring, file)  │
+ │   Application ──TB4──▶ SockGate_Client ──TB5──▶ OS Key Store (CNG/TPM, TPM2, file)           │
  │                               │                                                             │
  └───────────────────────────────┼─────────────────────────────────────────────────────────────┘
                                  │ TB1 (network, 완전 비신뢰: proxy / MITM / 공격자)
@@ -48,7 +48,7 @@
 
 - 애플리케이션은 신뢰하지만, 입력은 검증한다 (NULL, 크기, 구조체 `size/version`, 문자열 길이).
 - 구조체는 `size` 필드로 버전을 판별하고, 라이브러리가 아는 범위 밖 필드는 읽지 않는다.
-- 콜백은 라이브러리 내부 lock 을 잡지 않은 상태에서 호출된다.
+- 콜백은 라이브러리 내부 lock 을 잡지 않은 상태에서 호출된다 (예외: 로그 콜백, 서버 Stop/Destroy 중 콜백 — 09 §5.3).
 - 라이브러리가 반환한 메모리는 없다(호출자 버퍼에 복사). 소유권 이동이 없는 API 로 설계한다.
 
 ## TB5 — SockGate ↔ OS Key Store
@@ -61,8 +61,13 @@
 ## TB6 — Server ↔ Storage
 
 - registry / license 파일은 서버 프로세스만 쓰기 가능해야 한다 (배포 가이드에서 요구).
-- 파일 로드 시에도 비신뢰 입력으로 파싱한다 (길이/형식/곡선 검증).
-- 쓰기는 임시 파일 + rename 으로 원자적으로 수행한다.
+- 파일 로드 시에도 비신뢰 입력으로 파싱한다 (길이/형식/곡선 검증, registry 의 중복 사용 token id 거부).
+  파일 크기 상한은 512 MiB 이며, 두 저장소 모두 로드할 수 없는 크기의 파일은 쓰지 않는다 (`SG_LIMIT_EXCEEDED`).
+- 쓰기는 임시 파일 + rename 으로 원자적으로 수행한다. 새로 쓰는 파일은 소유자 전용이다 (POSIX `0600`, Windows 는
+  사용자/SYSTEM/Administrators 만 허용하는 보호된 DACL).
+- 파일 저장소는 열려 있는 동안 `<path>.lock` 에 배타 lock 을 잡는다 (같은 저장소를 여는 두 번째 프로세스는 `SG_INVALID_STATE`).
+- (v1 미구현: 로드 시 기존 파일의 권한/소유자 검사와 Windows reparse point 검사 — POSIX 는 `O_NOFOLLOW` + 일반 파일 확인만
+  하고, Windows 는 경로를 그대로 열어 읽는다.)
 
 ## 경계별 검증 책임 요약
 
@@ -70,9 +75,9 @@
 |---|---|---|
 | TB1 proxy 응답 | ProxyConnector | `SG_PROXY_ERROR`, 연결 폐기 |
 | TB1 TLS | TlsEngine + 검증 콜백 | `SG_TLS_ERROR` / `SG_CERTIFICATE_ERROR` / `SG_PINNING_ERROR` |
-| TB2 프레임 | FrameDecoder, SequenceValidator, ChannelProtector | 연결 종료 |
-| TB3 인증 | Authenticator | 일반화된 REJECTED |
-| TB3 권한 | Authorizer | REJECTED 또는 Restricted |
+| TB2 프레임 | FrameDecoder, ProtectedChannel (sequence/request id/tag) | 연결 종료 |
+| TB3 인증 | ServerHandshake | 일반화된 REJECTED |
+| TB3 권한 | BuiltinAuthorizer (+ `on_authorize`) | REJECTED 또는 Restricted |
 | TB4 API 인자 | C ABI 계층 | `SG_INVALID_ARGUMENT` |
 | TB5 key store | IKeyStore 구현 | `SG_KEYSTORE_ERROR` |
 | TB6 storage | Registry loader | 서버 시작 실패 또는 레코드 무시 + 로그 |
