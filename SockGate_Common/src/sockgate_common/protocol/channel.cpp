@@ -150,6 +150,8 @@ Status ProtectedChannel::Open(DecodedFrame* frame, Bytes* plaintext_frame_out)
     const crypto::AeadNonce nonce = NonceFor(h.sequence);
     crypto::AeadTag tag;
     const ByteView tag_bytes = frame->auth_tag();
+    // The header rules already demand a tag here; never copy from a short or empty view.
+    if (tag_bytes.size() != tag.size()) return Poison(SG_PROTOCOL_ERROR);
     std::memcpy(tag.data(), tag_bytes.data(), tag.size());
     const ByteView header_bytes = frame->header_bytes();
     const ByteView payload = frame->payload();
