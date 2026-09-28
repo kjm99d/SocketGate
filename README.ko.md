@@ -91,6 +91,5 @@ docs/design/       설계 문서 01–13
 
 ## 라이선스
 
-SockGate 는 [GNU AGPL v3.0](LICENSE)(`AGPL-3.0-only`)과, AGPL 의무 없이 쓰기 위한(예: 소스를 공개하지 않는 애플리케이션)
-상용 라이선스의 이중 라이선스이다. 자세한 내용은 [LICENSING.md](LICENSING.md), 제3자 구성 요소는
+SockGate 는 [MIT 라이선스](LICENSE)로 배포한다. 제3자 구성 요소(OpenSSL, tpm2-tss)는 각자의 라이선스를 따른다.
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 를 본다.

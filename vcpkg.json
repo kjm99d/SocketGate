@@ -3,7 +3,7 @@
   "name": "sockgate",
   "version-semver": "0.1.0",
   "description": "SockGate - embeddable authenticated secure transport gate",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "dependencies": [
     {
       "name": "openssl",

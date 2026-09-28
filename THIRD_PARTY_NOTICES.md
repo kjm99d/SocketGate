@@ -16,7 +16,8 @@ Where the license texts are:
 - **tpm2-tss:** `LICENSE` in the tpm2-tss sources, or the distribution's package documentation
   (e.g. `/usr/share/doc/libtss2-esys*/copyright` on Debian and Ubuntu).
 
-Apache-2.0 and BSD-2-Clause are compatible with SockGate's AGPL-3.0 license.
+SockGate itself is released under the MIT License ([LICENSE](LICENSE)); Apache-2.0 and BSD-2-Clause impose no
+conditions on it beyond keeping these components' own notices.
 
 Tools used only to build, test or document SockGate (CMake, vcpkg, Doxygen, libFuzzer, the compilers and the CI
 services) are not distributed with it.

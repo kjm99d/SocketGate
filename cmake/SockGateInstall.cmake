@@ -56,7 +56,6 @@ install(FILES
 # statically) ships its license as share/openssl/copyright next to its include directory.
 install(FILES
         "${PROJECT_SOURCE_DIR}/LICENSE"
-        "${PROJECT_SOURCE_DIR}/LICENSING.md"
         "${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 get_filename_component(_sg_openssl_prefix "${OPENSSL_INCLUDE_DIR}" DIRECTORY)

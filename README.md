@@ -95,6 +95,5 @@ Report vulnerabilities privately to the maintainers, not in public issues.
 
 ## License
 
-SockGate is dual-licensed under the [GNU AGPL v3.0](LICENSE) (`AGPL-3.0-only`) or a commercial license for use
-without the AGPL's obligations, for example in closed-source applications. See [LICENSING.md](LICENSING.md);
-third-party components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+SockGate is released under the [MIT License](LICENSE). Third-party components (OpenSSL, tpm2-tss) keep their own
+licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
