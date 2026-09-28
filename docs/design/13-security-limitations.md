@@ -21,10 +21,13 @@ SockGate 의 목표는 **네트워크 proxy / MITM 만으로 정상 인증 세�
 ## 2. Proxy / MITM
 
 - "로컬 proxy 를 완전히 차단한다" 는 보안 목표가 아니다. proxy 사용 자체는 인증 실패 사유가 아니다.
-- **pinning 을 설정하지 않고 시스템 trust store 를 사용**하면, 사용자 설치 CA 로 MITM 하는 공격자는
-  - 서버측에서 인증된 세션을 만들 수는 **없지만** (채널 바인딩),
-  - 클라이언트에게 가짜 서버로 보일 수는 **있다** (가짜 AUTH_RESULT).
+- **pinning 을 설정하지 않고 시스템 trust store 를 사용**하면 (명시적 `SG_SERVER_FLAG_ALLOW_NO_PINNING` 필요), 사용자 설치 CA 로 MITM 하는 공격자는
+  - 피해자의 세션을 중계해 서버측 인증 세션을 만들 수는 **없고** (채널 바인딩),
+  - 피해자의 enrollment token 을 가로채 자기 키로 등록할 수도 **없지만** (token 비밀 비전송 + 채널 결속 MAC),
+  - 클라이언트에게 가짜 서버로 보일 수는 **있다** (가짜 AUTH_RESULT, 가짜 데이터).
   → 운영 환경에서는 사설 CA + SPKI pinning, 또는 서버 proof key 를 반드시 설정할 것.
+- 프레임 단위 GCM tag 와 재인증 rekey 는 TLS 를 종단한 MITM 에 대한 방어가 아니다 (키가 같은 TLS 세션에서 유도됨).
+  재인증은 TLS 1.3 KeyUpdate 를 함께 수행하지만 post-compromise security 를 주장하지 않는다.
 - 클라이언트가 장악되면 pinning 설정 자체를 변경할 수 있다.
 
 ## 3. Integrity 검사

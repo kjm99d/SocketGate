@@ -53,7 +53,7 @@ Worker thread × N: GetQueuedCompletionStatusEx → IoOperation* → 핸들러
 | 범위 | 기본 사용자 범위. `SG_KEYSTORE_FLAG_MACHINE` 이면 `NCRYPT_MACHINE_KEY_FLAG` |
 | 서명 | SHA-256 (BCrypt) → `NCryptSignHash` → P1363 64 bytes |
 | 공개키 | `NCryptExportKey(BCRYPT_ECCPUBLIC_BLOB)` → SEC1 `0x04‖X‖Y` 변환 |
-| 메타데이터 | installation_id 는 키 속성(사용자 정의 property `SockGate.InstallationId`)에 저장 |
+| 메타데이터 | 없음. installation_id 는 공개키에서 유도 (06 §2.1) |
 | 삭제 | `NCryptDeleteKey` |
 | AUTO | TPM provider 열기 성공 + 키 생성 성공 시 TPM, 아니면 Software KSP |
 

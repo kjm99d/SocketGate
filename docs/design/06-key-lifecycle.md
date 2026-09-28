@@ -5,7 +5,7 @@
 | 키 | 소유 | 알고리즘 | 저장 | 수명 |
 |---|---|---|---|---|
 | Installation key | 클라이언트 | ECDSA P-256 | IKeyStore (CNG/TPM, TPM2, keyring, file) | installation 수명, 교체 가능 |
-| Installation ID | 클라이언트 | 16 bytes CSPRNG | key store 메타데이터 | installation 수명 |
+| Installation ID | 클라이언트 | `SHA-256("SockGate/v1/iid" ‖ SEC1 공개키)[0..16)` | 공개키에서 매번 유도 | 키 수명 |
 | 서버 TLS 키 / 인증서 | 서버 | ECDSA/RSA (TLS 정책) | PEM 파일 (배포 환경 보호) | 인증서 유효기간 |
 | 서버 proof key (선택) | 서버 | ECDSA P-256 | PEM 파일 | 운영 정책 |
 | Enrollment token key | 서버 | HMAC-SHA256 32 bytes | 설정 파일 또는 시작 시 생성 | 운영 정책 |
@@ -24,9 +24,11 @@
 SG_Client_EnsureIdentity(client, &info)
    ├─ key store 에 identity(name) 존재? ── yes → 로드, installation_id 반환
    └─ no → GenerateKeyPair(ECDSA P-256, non-exportable if supported)
-           installation_id = CSPRNG(16)
-           메타데이터 저장 (installation_id, algorithm, created_at, key store 종류)
+           installation_id = SHA-256("SockGate/v1/iid" ‖ public_key)[0..16)
 ```
+
+installation_id 를 공개키에서 유도하므로 (1) 별도 메타데이터 저장이 필요 없고, (2) 다른 installation 의 ID 를
+선점(squatting)할 수 없으며, (3) 서버가 enrollment 시 ID 와 키의 관계를 검증할 수 있다.
 
 - identity 이름: `SG_ClientConfig.identity_name` (애플리케이션별로 구분, 예: `"com.example.product"`).
 - 같은 이름에 대해 동시 생성 경쟁은 key store 수준의 배타적 생성(CNG: `NCRYPT_OVERWRITE_KEY_FLAG` 미사용,
@@ -57,7 +59,8 @@ private key 는 어떤 경로로도 서버에 전송되지 않는다.
 ### 2.5 폐기 (revocation)
 
 - 서버: `SG_Server_RevokeClient(installation_id)` → registry 상태 `REVOKED`, 즉시 저장.
-- 활성 세션은 다음 재인증 또는 `SG_Server_CloseSessionsForInstallation` 호출 시 종료된다.
+- 해당 installation 의 **활성 세션은 즉시 종료**된다 (CLOSE(AUTH_FAILED)). 재인증을 기다리지 않는다.
+- `SG_Server_RevokeLicense(license_id)` 도 해당 라이선스로 인가된 세션을 즉시 종료한다.
 
 ### 2.6 삭제
 
@@ -102,3 +105,15 @@ Linux keyring 은 재부팅 시 소멸하므로 영속 저장소로 사용하지
 - challenge 는 발급 시각을 저장하고, 검증 시 `now - issued > ttl` 이면 거부.
 - 검증 시도 시 **먼저 소비(consumed=true)** 하고 검증한다 → 동일 challenge 재시도 불가.
 - 연결당 최초 인증은 1회만 허용.
+
+## 7. Enrollment token
+
+| 값 | 위치 | 비밀 여부 |
+|---|---|---|
+| `server_token_key` (32 bytes) | 서버 설정 또는 시작 시 생성 | 비밀 |
+| `token_pub` (token_id + claims) | CLIENT_HELLO 로 전송 | 공개 |
+| `K_tok = HMAC(server_token_key, …token_pub)` | token 문자열 안, 클라이언트 메모리 | 비밀, **전송 금지** |
+| `enroll_mac = HMAC(K_tok, …TH1)` | CLIENT_PROOF | 채널 결속된 증명 |
+
+- 사용된 `token_id` 는 registry 에 영구 기록된다 (만료 후에도 유지 — 만료 시각 이후 정리 가능).
+- token 문자열은 로그에 기록하지 않는다. 클라이언트는 enroll 후 token 문자열을 즉시 cleanse 한다.

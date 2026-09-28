@@ -39,13 +39,16 @@ A7 은 **완전한 방어 대상이 아니다**. 비용을 높이는 것이 목�
 | 서버 사칭 (A2, A8) | 체인 검증 + hostname + 유효기간 + 서명, SPKI pinning, (선택) 서버 proof 서명 | pinning 미설정 + 사용자 CA 설치 시 A4 가 서버를 사칭할 수 있음 (단, 서버측 인증 세션은 만들 수 없음) |
 | 클라이언트 사칭 (A5) | installation 별 ECDSA P-256 키 + 서버 challenge 서명 | private key 유출 시 사칭 가능 → 폐기 API |
 | 인증 중계 (A4 가 서버–클라이언트 사이 TLS 두 개를 종단) | 서명 transcript 에 **TLS exporter 채널 바인딩** 포함 → 서버가 자기 TLS 세션의 exporter 로 검증하므로 불일치 | 클라이언트 프로세스 장악(A7) 시 우회 가능 |
-| installation ID 추측 | ID 는 식별자일 뿐 비밀이 아님. 인증은 항상 서명 | - |
+| installation ID 추측/선점 | ID 는 공개키에서 유도되는 식별자일 뿐 비밀이 아님. 인증은 항상 서명. enrollment 시 ID = H(공개키) 검증 | - |
+| Enrollment token 탈취 후 공격자 키로 등록 (A4) | token 비밀(`K_tok`)을 전송하지 않고 채널 결속 MAC 으로만 증명 (05 §2) | 클라이언트 호스트에서 token 문자열 유출 시 |
+| Pin 우회 (위조 leaf + 진짜 인증서 덧붙이기) | pin 은 검증된 체인에만 비교 (05 §1) | - |
+| TLS 1.2 채널 바인딩 약화 | TLS 1.2 는 옵션이며 EMS 필수 | - |
 
 ### 3.2 Tampering
 
 | 위협 | 대응 |
 |---|---|
-| 전송 중 변조 (A2/A3) | TLS AEAD + 프레임 단위 AES-256-GCM tag |
+| 전송 중 변조 (A2/A3) | TLS AEAD. 프레임 단위 AES-256-GCM tag 는 TLS exporter 에서 유도되므로 **네트워크 공격자에 대한 추가 방어가 아니라** 세션·sequence 결속과 TLS 구현 결함 대비 심층 방어이다 |
 | 프레임 재정렬/삭제/중복 | 방향별 sequence 가 정확히 +1 이어야 함. 위반 시 즉시 종료 |
 | 핸드셰이크 메시지 변조 | transcript 해시에 ClientHello/ServerHello 전체 바이트 포함 |
 | 클라이언트 바이너리 변조 (A7) | integrity 보고 + 서버 정책 (단독 인증 수단 아님) |
@@ -73,7 +76,8 @@ A7 은 **완전한 방어 대상이 아니다**. 비용을 높이는 것이 목�
 | 대량 연결 | `max_connections`, 핸드셰이크 타임아웃, 미인증 연결 수 상한 |
 | 거대 프레임 | 헤더 단계에서 `payload_length` 상한 검사 (핸드셰이크 4 KiB, 데이터 기본 1 MiB, 절대 상한 16 MiB) |
 | 느린 전송 (slowloris) | 핸드셰이크 전체 타임아웃, idle 타임아웃 |
-| 서명 검증 CPU 소모 | 연결당 인증 시도 1회. 미등록 installation 은 서명 검증 전에 거부 |
+| 서명 검증 CPU 소모 | 연결당 최초 인증 1회, 재인증 최소 간격 10 s, enrollment 는 저렴한 HMAC 검사를 서명 검증보다 먼저 수행 |
+| 미인증 상태의 거대 프레임 버퍼링 | 인증 전에는 type 과 무관하게 4 KiB 상한, type-상태 검증을 헤더 단계에서 수행 |
 | 파서 크래시 | bounds-checked Reader, overflow 사전 검사, fuzzing |
 
 ### 3.6 Elevation of Privilege
@@ -97,7 +101,7 @@ A7 은 **완전한 방어 대상이 아니다**. 비용을 높이는 것이 목�
 | Expired Challenge | challenge TTL | 거부 |
 | Reused Challenge | challenge 1회 소비 + 연결당 1회 인증 | 거부 |
 | Replayed Authentication | 새 연결은 새 challenge + 새 exporter → 이전 서명 무효 | 거부 |
-| Modified / Expired Token | enrollment token HMAC + 만료 + 1회 사용 | 거부 |
+| Modified / Expired Token | enrollment token HMAC 키 재계산 + 채널 결속 MAC + 만료 + 원자적 1회 사용 | 거부 |
 | Invalid Client ID | registry 조회 실패 | 거부 |
 | Packet Replay / Duplication / Reordering | TLS + 엄격한 sequence | `SG_REPLAY_DETECTED` / `SG_PROTOCOL_ERROR` |
 | Packet Modification | TLS + GCM tag | 연결 종료 |

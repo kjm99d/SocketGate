@@ -45,14 +45,17 @@
 |---:|---|---|
 | 0 | `ENCRYPTED` | payload 가 application-layer AEAD 로 암호화됨. 인증 후 프레임에서만 허용 |
 | 1 | `RESPONSE` | `request_id` 가 상대방 요청에 대한 응답 ID |
-| 2–15 | reserved | 반드시 0 |
+| 2 | `KEY_PHASE` | 이 프레임을 보호한 키의 `epoch & 1`. 인증 후 프레임에서만 의미가 있고 AAD(헤더)에 포함된다 (§7.3) |
+| 3–15 | reserved | 반드시 0 |
+
+인증 전 프레임은 `flags == 0` 이어야 한다.
 
 ### 2.3 길이 상한
 
 | 상수 | 값 | 적용 |
 |---|---|---|
 | `SG_FRAME_HEADER_SIZE` | 48 | |
-| `SG_MAX_HANDSHAKE_PAYLOAD` | 4096 | CLIENT_HELLO ~ AUTH_RESULT, REAUTH_* |
+| `SG_MAX_HANDSHAKE_PAYLOAD` | 4096 | **인증 완료 전의 모든 프레임**(type 무관), REAUTH_*, PING/PONG/CLOSE |
 | `SG_DEFAULT_MAX_PAYLOAD` | 1 MiB | DATA (설정 가능) |
 | `SG_ABSOLUTE_MAX_PAYLOAD` | 16 MiB | 설정으로도 넘을 수 없는 컴파일 상수 |
 | `SG_AUTH_TAG_SIZE` | 16 | |
@@ -69,11 +72,13 @@
 5. `flags` 에 예약 비트 → `SG_PROTOCOL_ERROR`
 6. `reserved != 0` → `SG_PROTOCOL_ERROR`
 7. `auth_length ∉ {0, 16}` → `SG_PROTOCOL_ERROR`
-8. `payload_length > type 별 상한` → `SG_PROTOCOL_ERROR` (본문을 읽기 전에 거부)
-9. 전체 프레임이 모일 때까지 대기
-10. 상태 머신 검증: 방향, 상태에서 허용되는 type, session_id, sequence, request_id, auth_length 요구 여부
-11. auth tag 검증 (인증 후 프레임)
-12. payload 디코드 (메시지별 엄격 파서)
+8. **헤더 단계 상태 검증** (본문을 버퍼링하기 전에): 현재 상태·방향에서 허용되는 `type` 인지, `auth_length` 요구 여부
+9. `payload_length > 상한` → `SG_PROTOCOL_ERROR`. 상한은 **연결 상태**로 결정한다:
+   인증 완료 전에는 type 과 무관하게 `SG_MAX_HANDSHAKE_PAYLOAD`, 인증 후 DATA 는 `max_payload`, 그 외 제어 메시지는 `SG_MAX_HANDSHAKE_PAYLOAD`
+10. 전체 프레임이 모일 때까지 대기
+11. 상태 머신 검증: session_id, sequence, request_id, `KEY_PHASE`
+12. auth tag 검증 (인증 후 프레임)
+13. payload 디코드 (메시지별 엄격 파서)
 
 ## 3. Message Types
 
@@ -82,10 +87,10 @@
 | 0x01 | `CLIENT_HELLO` | C→S | Server: AwaitHello | 0 |
 | 0x02 | `SERVER_HELLO` | S→C | Client: AwaitServerHello | 0 |
 | 0x03 | `CLIENT_PROOF` | C→S | Server: AwaitProof | 0 |
-| 0x04 | `AUTH_RESULT` | S→C | Client: AwaitResult | 0 |
-| 0x10 | `DATA` | 양방향 | Active | 16 |
-| 0x11 | `PING` | 양방향 | Active | 16 |
-| 0x12 | `PONG` | 양방향 | Active | 16 |
+| 0x04 | `AUTH_RESULT` | S→C | Client: AwaitResult (또는 AwaitServerHello — `UNSUPPORTED_VERSION` 전용, §10) | 0 |
+| 0x10 | `DATA` | 양방향 | Active, Refreshing | 16 |
+| 0x11 | `PING` | 양방향 | Active, Refreshing | 16 |
+| 0x12 | `PONG` | 양방향 | Active, Refreshing | 16 |
 | 0x20 | `REAUTH_REQUEST` | C→S | Active | 16 |
 | 0x21 | `REAUTH_CHALLENGE` | S→C | Refreshing | 16 |
 | 0x22 | `REAUTH_PROOF` | C→S | Refreshing | 16 |
@@ -128,10 +133,15 @@ TLV      extensions
 | 3 | `LICENSE_ID` | UTF-8 | 1..128 |
 | 4 | `REQUESTED_FEATURES` | u64 bitmask | 8 |
 | 5 | `INTEGRITY_REPORT` | §5.5 | ≤ 512 |
-| 6 | `ENROLLMENT_TOKEN` | opaque | 1..512, ENROLL 모드에서 필수 |
+| 6 | `ENROLLMENT_TOKEN_ID` | token 의 **공개 부분** (`token_id ‖ claims`, 05 §2) — token 비밀키는 절대 전송하지 않음 | 1..512, ENROLL 모드에서 필수 |
 | 7 | `PUBLIC_KEY` | SEC1 uncompressed P-256 point (0x04‖X‖Y) | 65, ENROLL 모드에서 필수 |
 
-AUTHENTICATE 모드에서 `ENROLLMENT_TOKEN`, `PUBLIC_KEY` 가 있으면 오류.
+- AUTHENTICATE 모드에서 `ENROLLMENT_TOKEN_ID`, `PUBLIC_KEY` 가 있으면 오류.
+- `installation_id` 는 공개키에서 유도된다: `installation_id = SHA-256("SockGate/v1/iid" ‖ PUBLIC_KEY)[0..16)`.
+  ENROLL 모드에서 서버는 이 관계를 검증한다 (다른 installation 의 ID 선점 방지).
+- ENROLL 모드의 `PRODUCT_ID` / `LICENSE_ID` TLV 는 없거나 token claims 와 정확히 같아야 한다. 권한 판단에는 token claims 가 사용된다.
+- 프레임 헤더의 `version` 은 wire 레이아웃 버전이며 CLIENT_HELLO 는 항상 `version = 1` 로 전송한다.
+  프로토콜 기능 버전은 CLIENT_HELLO 내부의 `protocol_version_min/max` 로 협상한다.
 
 ### 5.2 SERVER_HELLO (0x02)
 
@@ -151,8 +161,14 @@ TLV      extensions                (v1 정의 없음)
 ```text
 u8       signature_algorithm       (1 = ECDSA_P256_SHA256)
 vec16    signature                 (P1363 r‖s, 정확히 64 bytes)
-TLV      extensions                (v1 정의 없음)
+TLV      extensions
 ```
+
+| TLV type | 이름 | 값 | 제약 |
+|---:|---|---|---|
+| 1 | `ENROLLMENT_PROOF` | `HMAC-SHA256(K_tok, "SockGate/v1/enroll-proof" ‖ 0x00 ‖ TH1)` | 32, ENROLL 모드에서 필수, AUTHENTICATE 모드에서 금지 |
+
+서버는 **registry 에 저장된 알고리즘**(v1: ECDSA P-256)으로만 검증한다. `signature_algorithm` 이 그와 다르면 거부한다.
 
 ### 5.4 AUTH_RESULT (0x04)
 
@@ -185,11 +201,15 @@ vec16    build_id                  (≤ 64)
 ### 6.1 채널 바인딩
 
 ```text
-channel_binding = TLS-Exporter(label = "EXPORTER-Channel-Binding", context = "", length = 32)   // RFC 9266
+channel_binding = TLS-Exporter(label = "EXPORTER-Channel-Binding", no context, length = 32)   // RFC 9266
+                = SSL_export_keying_material(ssl, out, 32, "EXPORTER-Channel-Binding", 24, NULL, 0, use_context = 0)
 ```
 
 클라이언트와 서버는 각자 **자기 쪽 TLS 연결**에서 값을 계산한다.
 중간자가 TLS 를 두 번 종단하면 양쪽 값이 달라지므로 클라이언트 서명이 서버에서 검증되지 않는다.
+
+TLS 1.2 (호환 옵션) 에서는 RFC 9266 에 따라 **Extended Master Secret 이 협상된 경우에만** exporter 를 채널 바인딩으로
+사용할 수 있다. 양쪽 모두 TLS 1.2 로 협상되었는데 `SSL_get_extms_support() != 1` 이면 즉시 연결을 끊는다 (`SG_TLS_ERROR`).
 
 ### 6.2 Transcript Hash
 
@@ -215,11 +235,17 @@ signature = ECDSA-P256-SHA256(installation_private_key, client_signed_data)   //
 ### 6.4 Server Proof 서명 (선택)
 
 ```text
-TH2 = SHA-256( TH1 || u32(len(ClientProof frame)) || ClientProof frame || AUTH_RESULT 고정부(서명 필드 제외) )
+R   = AUTH_RESULT 프레임의 헤더(48) ‖ payload 중 server_proof_algorithm 필드까지 (마지막 vec16 server_signature 제외)
+TH2 = SHA-256( "SockGate/v1/server-transcript" || TH1
+               || u32(len(ClientProof frame)) || ClientProof frame
+               || u32(len(R)) || R )
 server_signed_data = "SockGate/v1/server-proof" || 0x00 || TH2
 ```
 
-클라이언트에 `server_proof_keys` 가 설정되어 있으면 서명이 없거나 검증 실패 시 `SG_INVALID_SIGNATURE` 로 연결을 끊는다.
+- 헤더의 `payload_length` 는 서명 필드를 포함한 최종 길이이므로 R 은 결정적이다.
+- SERVER_HELLO 와 AUTH_RESULT 의 `server_proof_algorithm` 은 같아야 한다.
+- 클라이언트에 `server_proof_keys` 가 설정되어 있으면 서버가 무엇을 광고하든 서명을 **요구**한다.
+  서명이 없거나 검증 실패 시 `SG_INVALID_SIGNATURE` 로 연결을 끊는다 (알고리즘 필드로 인한 downgrade 불가).
 
 ## 7. 세션 키와 프레임 보호
 
@@ -231,8 +257,14 @@ k_cs = HKDF-SHA256(ikm = km, salt = session_id, info = "SockGate/v1 c2s" || u32(
 k_sc = HKDF-SHA256(ikm = km, salt = session_id, info = "SockGate/v1 s2c" || u32(epoch), L = 32)
 ```
 
-- `epoch` 는 최초 인증 시 0, 재인증 성공마다 +1. 재인증 시 `TH1` 자리에 재인증 transcript 해시를 사용한다.
+- `km` 은 `use_context = 1` 로 호출한다 (`SSL_export_keying_material(..., TH1, 32, 1)`).
+- `epoch` 는 최초 인증 시 0, 재인증 성공마다 +1. 재인증 시 `TH1` 자리에 재인증 transcript 해시 `THr` 를 사용한다.
 - 키는 메모리에만 존재하며 세션 종료/rekey 시 `OPENSSL_cleanse` 로 지운다.
+- 재인증 시 TLS 1.3 이면 `SSL_key_update(SSL_KEY_UPDATE_REQUESTED)` 도 함께 수행하여 TLS 트래픽 키도 교체한다.
+
+> 이 채널 보호 키는 TLS exporter 에서 유도되므로 **TLS 를 종단한 MITM 에 대한 추가 방어가 아니다.**
+> 목적은 (1) 프레임을 세션 ID·sequence·방향·epoch 에 암호학적으로 결속, (2) TLS 계층 구현 결함에 대한 심층 방어,
+> (3) 선택적 애플리케이션 계층 암호화이다. MITM 방어는 인증서 검증·pinning·채널 바인딩·서버 proof 가 담당한다.
 
 ### 7.2 AEAD
 
@@ -242,6 +274,19 @@ k_sc = HKDF-SHA256(ikm = km, salt = session_id, info = "SockGate/v1 s2c" || u32(
 - `ENCRYPTED` 미설정: `AAD = header || payload`, 평문 없음 → tag 만 생성 (GMAC)
 - `ENCRYPTED` 설정: `AAD = header`, payload 를 암호화
 - 서버 옵션 `require_app_encryption` 이 켜져 있으면 `ENCRYPTED` 없는 DATA 는 거부
+
+### 7.3 방향별 키 전환 (KEY_PHASE)
+
+재인증 중에도 DATA 가 계속 흐르므로 두 방향의 키를 **동시에** 바꾸지 않는다. 각 방향의 송신자가 자기 방향의 전환 시점을 정한다
+(TLS 1.3 KeyUpdate 와 같은 모델).
+
+| 방향 | 전환 시점 | 수신측 규칙 |
+|---|---|---|
+| s2c | 서버가 `REAUTH_RESULT(OK)` 를 **epoch e 키로 보낸 직후**부터 e+1 | 스트림 순서가 보장되므로 클라이언트는 REAUTH_RESULT 처리 직후부터 e+1 만 허용 |
+| c2s | 클라이언트가 `REAUTH_RESULT(OK)` 를 처리한 시점(송신 lock 안에서)부터 e+1 | 서버는 REAUTH_RESULT 송신 후 e 와 e+1 두 키를 보유. `KEY_PHASE` 로 키를 선택. **처음으로 e+1 프레임을 받는 즉시 e 키를 cleanse**, 이후 e 프레임은 치명적 오류 |
+
+- `KEY_PHASE` 는 AAD(헤더)에 포함되므로 변조하면 tag 검증이 실패한다.
+- 한 번에 하나의 재인증만 진행한다. 서버는 c2s 전환이 확인되기 전(구 키 보유 중)에는 새 REAUTH_REQUEST 를 거부한다.
 
 ## 8. 인증 후 메시지
 
@@ -258,12 +303,17 @@ k_sc = HKDF-SHA256(ikm = km, salt = session_id, info = "SockGate/v1 s2c" || u32(
 재인증 transcript:
 
 ```text
+F(x) = x 프레임의 헤더(48, auth_length=16 상태) ‖ 평문 payload       (tag 제외, ENCRYPTED 여부와 무관하게 평문)
 THr = SHA-256( "SockGate/v1/reauth" || session_id || u32(epoch) || channel_binding || prev_TH
-               || REAUTH_REQUEST frame || REAUTH_CHALLENGE frame )
+               || u32(len(F(REAUTH_REQUEST))) || F(REAUTH_REQUEST)
+               || u32(len(F(REAUTH_CHALLENGE))) || F(REAUTH_CHALLENGE) )
 signed = "SockGate/v1/reauth-proof" || 0x00 || THr
 ```
 
-REAUTH_RESULT(OK) 프레임은 **이전 epoch 키**로 보호되고, 그 다음 프레임부터 양방향 모두 새 epoch 키를 사용한다.
+- `prev_TH` 는 직전 인증의 transcript 해시(TH1 또는 이전 THr).
+- REAUTH_RESULT(OK) 는 epoch e 키로 보호되며, 키 전환은 §7.3 규칙을 따른다.
+- 클라이언트는 `new_epoch == epoch + 1` 을 확인한다.
+- 서버는 세션당 재인증 빈도를 제한한다 (기본: 직전 재인증 후 10 s 이내 요청 거부 → CLOSE(PROTOCOL_ERROR)).
 
 ## 9. Sequence / Request ID 규칙
 
@@ -280,5 +330,8 @@ REAUTH_RESULT(OK) 프레임은 **이전 epoch 키**로 보호되고, 그 다음 
 ## 10. 버전 협상
 
 - 클라이언트는 `[min, max]` 범위를 보낸다. 서버는 지원하는 최고 버전을 고른다.
-- 교집합이 없으면 `AUTH_RESULT(UNSUPPORTED_VERSION)` 후 종료. 클라이언트는 `SG_VERSION_MISMATCH` 반환.
-- 프레임 헤더 `version` 은 wire 포맷 버전이며 v1 에서 항상 1.
+- 클라이언트는 `selected_protocol_version ∈ [min, max]` 를 확인한다.
+- 교집합이 없으면 서버는 SERVER_HELLO 대신 `AUTH_RESULT(UNSUPPORTED_VERSION)` 을 보내고 종료한다.
+  이 프레임은 `session_id = 0`, `sequence = 1`, 나머지 필드 0 이다. 클라이언트는 AwaitServerHello 상태에서
+  이 형태의 AUTH_RESULT 만 허용하며 `SG_VERSION_MISMATCH` 를 반환한다.
+- 프레임 헤더 `version` 은 wire 레이아웃 버전이며 v1 에서 항상 1. 레이아웃이 바뀌는 경우에만 증가한다.

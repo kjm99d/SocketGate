@@ -135,9 +135,9 @@ SG_Status SG_Server_GetSessionInfo(SG_Server* server, SG_SessionHandle session, 
 
 /* registry / license */
 SG_Status SG_Server_RegisterClient(SG_Server* server, const SG_ClientRecord* record);
-SG_Status SG_Server_RevokeClient(SG_Server* server, const SG_InstallationId* installation_id);
+SG_Status SG_Server_RevokeClient(SG_Server* server, const SG_InstallationId* installation_id);   /* 활성 세션 즉시 종료 */
 SG_Status SG_Server_AddLicense(SG_Server* server, const SG_LicenseRecord* license);
-SG_Status SG_Server_RevokeLicense(SG_Server* server, const char* license_id);
+SG_Status SG_Server_RevokeLicense(SG_Server* server, const char* license_id);                  /* 활성 세션 즉시 종료 */
 SG_Status SG_Server_IssueEnrollmentToken(SG_Server* server, const SG_EnrollmentTokenRequest* request,
                                          char* token, size_t capacity, size_t* written);
 SG_Status SG_Server_GetStats(SG_Server* server, SG_ServerStats* stats);
@@ -151,8 +151,10 @@ typedef struct SG_ServerCallbacks {
     void* user;
     /* 인증 성공 직후, 세션 활성화 전. decision 은 내장 정책 결과로 미리 채워져 있음 */
     SG_Status (*on_authorize)(void* user, const SG_AuthRequest* request, SG_AuthDecision* decision);
-    /* ENROLL 모드 token 검증. NULL 이면 내장 HMAC token 검증 사용 */
-    SG_Status (*on_enroll)(void* user, const SG_EnrollRequest* request);
+    /* ENROLL 모드 token 검증. NULL 이면 내장 token 검증 사용.
+       콜백은 token 공개 부분(token_pub)을 검증하고 그 token 의 K_tok(32 bytes)를 돌려준다.
+       SockGate 는 K_tok 로 채널 결속 enroll_mac 을 검증한다 (05 §2). */
+    SG_Status (*on_enroll)(void* user, const SG_EnrollRequest* request, uint8_t token_key_out[32]);
     void      (*on_session_opened)(void* user, const SG_ServerSessionInfo* info);
     void      (*on_message)(void* user, SG_SessionHandle session, const void* data, size_t size,
                             const SG_MessageInfo* info);

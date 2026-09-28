@@ -11,7 +11,11 @@
 | Windows SDK (ws2_32, ncrypt, bcrypt, crypt32, wintrust, psapi, winhttp) | Windows | 10.0.19041 | 최신 | 소켓, CNG, DPAPI, 서명 검증 | VS 설치 |
 
 - OpenSSL 1.1.x 는 지원하지 않는다 (EOL, `EVP_PKEY_fromdata`/`OSSL_PARAM` API 사용).
-- CMake 에서 `find_package(OpenSSL 3.0 REQUIRED)` 로 버전을 강제한다.
+- CMake 에서 `find_package(OpenSSL 3.0 REQUIRED)` 로 **API 수준** 최소 버전을 강제한다.
+- **보안 최소 요구**: 알려진 취약점이 패치된 OpenSSL. 업스트림 기준 3.0.7 미만(CVE-2022-3602/3786, X.509 검증 중 overflow)은
+  사용 금지. 업스트림 3.0 계열은 2026-09-07 EOL 이므로 **3.5 LTS 이상을 권장**한다.
+  배포판 패키지(예: Ubuntu 22.04 의 3.0.2)는 버전 번호와 무관하게 보안 패치가 백포트되므로 배포판 보안 업데이트를 적용한 상태를 전제로 한다.
+  실행 시 `OpenSSL_version_num() < 3.0.7` 이고 배포판 빌드가 아니면 경고 로그를 남긴다.
 - Windows 는 OpenSSL 을 **정적 링크**하여 `sockgate_client.dll` 하나로 배포할 수 있게 한다 (DLL hijacking 표면 축소).
   Linux 는 기본적으로 시스템 OpenSSL 에 동적 링크한다 (보안 업데이트를 배포판이 제공).
 - 배포판별 OpenSSL: Ubuntu 22.04 = 3.0.2, Ubuntu 24.04 = 3.0.13, Debian 12 = 3.0.x, Rocky 9 = 3.0.x/3.2.x → 모두 지원.
