@@ -128,7 +128,7 @@ bool SameFile(const std::string& a, const std::string& b)
     if (ec1 || ec2) return a == b;
 #ifdef _WIN32
     auto lower = [](std::string& v) {
-        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(v.begin(), v.end(), v.begin(), [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
     };
     lower(ca);
     lower(cb);

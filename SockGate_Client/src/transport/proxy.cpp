@@ -56,7 +56,7 @@ bool HasControlOrSeparator(const std::string& s)
 
 std::string ToLower(std::string s)
 {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(s.begin(), s.end(), s.begin(), [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
     return s;
 }
 
