@@ -1,0 +1,42 @@
+# SockGate_Common: shared protocol, serialization, crypto, TLS and platform code.
+# Built as an internal static library linked into SockGate_Client and SockGate_Server.
+
+set(SG_COMMON_SOURCES
+    src/sockgate_common/core/bytes.cpp
+    src/sockgate_common/core/log.cpp
+)
+
+if(SOCKGATE_PLATFORM STREQUAL "windows")
+    list(APPEND SG_COMMON_SOURCES
+        src/sockgate_common/platform/windows/socket_win.cpp
+    )
+else()
+    list(APPEND SG_COMMON_SOURCES
+        src/sockgate_common/platform/linux/socket_posix.cpp
+    )
+endif()
+
+add_library(sockgate_common STATIC ${SG_COMMON_SOURCES})
+add_library(SockGate::Common ALIAS sockgate_common)
+
+target_include_directories(sockgate_common
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(sockgate_common
+    PUBLIC
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+)
+
+if(SOCKGATE_PLATFORM STREQUAL "windows")
+    target_link_libraries(sockgate_common PUBLIC ws2_32 crypt32)
+endif()
+
+sockgate_configure_target(sockgate_common)
+
+install(DIRECTORY include/sockgate DESTINATION include)
