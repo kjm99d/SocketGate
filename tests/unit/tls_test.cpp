@@ -82,6 +82,21 @@ SG_TEST(Tls, HandshakeAndDataRoundTrip)
     SG_EXPECT_EQ(ReadAll(*p.client), std::string("pong"));
 }
 
+SG_TEST(Tls, ChannelBindingIsTheRfc9266Exporter)
+{
+    const TestCert ca = CreateRootCa("CA");
+    const TestCert leaf = IssueLocalhostServer(ca);
+    Pair p = MakePair(ClientConfigTrusting(ca), ServerConfigFor(leaf));
+    SG_ASSERT_OK(PumpHandshake(*p.client, *p.server));
+    crypto::Sha256Digest cb{};
+    SG_ASSERT_OK(p.client->ChannelBinding(&cb));
+    // tls-exporter: label "EXPORTER-Channel-Binding", zero-length context, 32 bytes.
+    crypto::Sha256Digest expected{};
+    SG_ASSERT_OK(p.server->ExportKeyingMaterial("EXPORTER-Channel-Binding", ByteView(), true, expected.data(),
+                                                expected.size()));
+    SG_EXPECT(cb == expected);
+}
+
 SG_TEST(Tls, ChannelBindingDiffersBetweenSessions)
 {
     // Models a MITM terminating two separate TLS sessions: the values differ,
@@ -385,6 +400,35 @@ SG_TEST(Tls, Tls12RejectedByDefault)
     std::unique_ptr<tls::ITlsEngine> client;
     SG_ASSERT_OK(cctx->CreateEngine(&client));
     SG_EXPECT_STATUS(server.Pump(*client), SG_TLS_ERROR);
+}
+
+SG_TEST(Tls, Tls12ChannelBindingUsesAnEmptyContext)
+{
+    // RFC 9266 tls-exporter: zero-length context. Under TLS 1.2 that differs
+    // from an exporter call without a context.
+    const TestCert ca = CreateRootCa("CA");
+    const TestCert leaf = IssueLocalhostServer(ca);
+    tls::TlsClientConfig cc = ClientConfigTrusting(ca);
+    cc.allow_tls12 = true;
+    std::shared_ptr<tls::ITlsContext> cctx;
+    SG_ASSERT_OK(tls::DefaultTlsProvider().CreateClientContext(cc, &cctx));
+    RawTls12Server server(leaf, /*disable_ems=*/false);
+    std::unique_ptr<tls::ITlsEngine> client;
+    SG_ASSERT_OK(cctx->CreateEngine(&client));
+    SG_ASSERT_OK(server.Pump(*client));
+    SG_ASSERT(!client->SessionInfo().tls13);
+    crypto::Sha256Digest cb{};
+    SG_ASSERT_OK(client->ChannelBinding(&cb));
+    static const char kLabel[] = "EXPORTER-Channel-Binding";
+    static const unsigned char kEmpty[1] = {0};
+    uint8_t empty_context[32];
+    uint8_t no_context[32];
+    SG_ASSERT(SSL_export_keying_material(server.ssl, empty_context, sizeof(empty_context), kLabel, sizeof(kLabel) - 1,
+                                         kEmpty, 0, 1) == 1);
+    SG_ASSERT(SSL_export_keying_material(server.ssl, no_context, sizeof(no_context), kLabel, sizeof(kLabel) - 1,
+                                         nullptr, 0, 0) == 1);
+    SG_EXPECT(std::memcmp(cb.data(), empty_context, sizeof(empty_context)) == 0);
+    SG_EXPECT(std::memcmp(empty_context, no_context, sizeof(no_context)) != 0);
 }
 
 SG_TEST(Tls, Tls12AllowedOnlyWithExtendedMasterSecret)

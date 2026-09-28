@@ -266,7 +266,9 @@ public:
     Status ChannelBinding(crypto::Sha256Digest* out) override
     {
         if (out == nullptr) return SG_INVALID_ARGUMENT;
-        return ExportKeyingMaterial(kChannelBindingLabel, ByteView(), false, out->data(), out->size());
+        // RFC 9266 tls-exporter: a zero-length context (not "no context", which
+        // gives a different value under TLS 1.2).
+        return ExportKeyingMaterial(kChannelBindingLabel, ByteView(), true, out->data(), out->size());
     }
 
     Status RequestKeyUpdate() override
