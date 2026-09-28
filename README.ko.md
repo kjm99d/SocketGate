@@ -88,3 +88,9 @@ docs/design/       설계 문서 01–13
 0.1.0 은 첫 릴리스 전이며 ABI 기준선이다. 0.x 동안은 minor 버전마다 ABI 가 바뀔 수 있다
 (soname `libsockgate_*.so.0.1`, CMake 패키지 호환성 SameMinorVersion). 변경 이력은 각 프로젝트의 CHANGELOG.md 를 본다.
 취약점은 공개 이슈가 아니라 메인테이너에게 비공개로 보고한다.
+
+## 라이선스
+
+SockGate 는 [GNU AGPL v3.0](LICENSE)(`AGPL-3.0-only`)과, AGPL 의무 없이 쓰기 위한(예: 소스를 공개하지 않는 애플리케이션)
+상용 라이선스의 이중 라이선스이다. 자세한 내용은 [LICENSING.md](LICENSING.md), 제3자 구성 요소는
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 를 본다.

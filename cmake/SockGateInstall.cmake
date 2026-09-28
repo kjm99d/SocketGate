@@ -51,3 +51,16 @@ install(FILES
         "${PROJECT_BINARY_DIR}/SockGateConfig.cmake"
         "${PROJECT_BINARY_DIR}/SockGateConfigVersion.cmake"
     DESTINATION ${SOCKGATE_CMAKE_DIR})
+
+# The license texts travel with every installed copy. A vcpkg OpenSSL (the Windows build links it
+# statically) ships its license as share/openssl/copyright next to its include directory.
+install(FILES
+        "${PROJECT_SOURCE_DIR}/LICENSE"
+        "${PROJECT_SOURCE_DIR}/LICENSING.md"
+        "${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+    DESTINATION ${CMAKE_INSTALL_DOCDIR})
+get_filename_component(_sg_openssl_prefix "${OPENSSL_INCLUDE_DIR}" DIRECTORY)
+if(EXISTS "${_sg_openssl_prefix}/share/openssl/copyright")
+    install(FILES "${_sg_openssl_prefix}/share/openssl/copyright"
+        DESTINATION ${CMAKE_INSTALL_DOCDIR} RENAME OPENSSL-LICENSE.txt)
+endif()

@@ -92,3 +92,9 @@ docs/design/       design documents 01–13
 0.1.0 is not yet released and is the ABI baseline. During 0.x, the ABI can change with every minor version
 (soname `libsockgate_*.so.0.1`, CMake package compatibility SameMinorVersion). For the change history, see each project's CHANGELOG.md.
 Report vulnerabilities privately to the maintainers, not in public issues.
+
+## License
+
+SockGate is dual-licensed under the [GNU AGPL v3.0](LICENSE) (`AGPL-3.0-only`) or a commercial license for use
+without the AGPL's obligations, for example in closed-source applications. See [LICENSING.md](LICENSING.md);
+third-party components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
