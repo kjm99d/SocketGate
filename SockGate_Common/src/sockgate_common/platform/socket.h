@@ -72,6 +72,10 @@ Status SetKeepAlive(NativeSocket socket, bool enable);
 // Creates, binds and listens. The listening socket is non-inheritable and
 // uses exclusive address semantics on Windows.
 Status CreateListener(const SocketAddress& address, int backlog, bool non_blocking, NativeSocket* out);
+// Blocking accept on a (blocking) listener; the new socket is not
+// inheritable. Used by tools and test intermediaries, not by the server
+// engine (which uses the asynchronous I/O service).
+Status AcceptConnection(NativeSocket listener, NativeSocket* out, SocketAddress* peer);
 Status GetLocalAddress(NativeSocket socket, SocketAddress* out);
 Status GetPeerAddress(NativeSocket socket, SocketAddress* out);
 

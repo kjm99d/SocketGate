@@ -242,6 +242,10 @@ Status ClientSession::Connect(const ServerTarget& target)
     if (!st.ok()) {
         SG_LOGW(settings_.logger, "event=tls_failed host=%s err=%s detail=\"%s\"", target.host.c_str(), st.name(),
                 channel->ErrorDetail().c_str());
+        if (st == SG_PINNING_ERROR) {
+            // The chain validated against a trusted CA but not the pinned keys.
+            SG_LOGE(settings_.logger, "event=possible_tls_interception host=%s", target.host.c_str());
+        }
         return Fail(generation, st);
     }
 

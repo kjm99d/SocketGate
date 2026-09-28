@@ -350,7 +350,17 @@ private:
                 if (ConstantTimeEqual(pin.data(), pin.size(), digest.data(), digest.size())) return OkStatus();
             }
         }
-        return Fail(SG_PINNING_ERROR, "no certificate in the verified chain matches a configured SPKI pin");
+        // Diagnostic only: the issuer of an unexpected-but-trusted chain is the
+        // typical fingerprint of TLS interception (corporate proxy, malware).
+        std::string issuer = "?";
+        if (sk_X509_num(chain) > 0) {
+            char name[256] = {};
+            X509_NAME_oneline(X509_get_issuer_name(sk_X509_value(chain, 0)), name, sizeof(name) - 1);
+            issuer = name;
+        }
+        return Fail(SG_PINNING_ERROR,
+                    "no certificate in the verified chain matches a configured SPKI pin (issuer: " + issuer +
+                        "; possible TLS interception)");
     }
 
     SslPtr ssl_;

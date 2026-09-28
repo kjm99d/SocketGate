@@ -9,15 +9,18 @@ set(SG_CLIENT_CORE_SOURCES
     src/crypto/key_store_factory.cpp
     src/session/client_session.cpp
     src/tls/tls_channel.cpp
+    src/transport/proxy.cpp
     src/transport/tcp_transport.cpp
     src/transport/transport_factory.cpp
 )
 
 if(SOCKGATE_PLATFORM STREQUAL "windows")
     list(APPEND SG_CLIENT_CORE_SOURCES
+        src/platform/windows/system_proxy_win.cpp
     )
 else()
     list(APPEND SG_CLIENT_CORE_SOURCES
+        src/platform/linux/system_proxy_linux.cpp
     )
 endif()
 
@@ -28,6 +31,9 @@ target_include_directories(sockgate_client_core
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(sockgate_client_core PUBLIC sockgate_common)
+if(SOCKGATE_PLATFORM STREQUAL "windows")
+    target_link_libraries(sockgate_client_core PUBLIC winhttp)  # system proxy settings (read-only)
+endif()
 sockgate_configure_target(sockgate_client_core)
 
 # Public library: only the C ABI is exported.

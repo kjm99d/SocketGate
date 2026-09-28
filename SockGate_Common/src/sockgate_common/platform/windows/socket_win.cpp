@@ -283,6 +283,20 @@ Status CreateListener(const SocketAddress& address, int backlog, bool non_blocki
     return OkStatus();
 }
 
+Status AcceptConnection(NativeSocket listener, NativeSocket* out, SocketAddress* peer)
+{
+    if (out == nullptr) return SG_INVALID_ARGUMENT;
+    SocketAddress addr;
+    int len = static_cast<int>(sizeof(addr.storage));
+    const SOCKET s = accept(ToSocket(listener), reinterpret_cast<sockaddr*>(addr.storage), &len);
+    if (s == INVALID_SOCKET) return SG_NETWORK_ERROR;
+    SetHandleInformation(reinterpret_cast<HANDLE>(s), HANDLE_FLAG_INHERIT, 0);
+    addr.length = static_cast<uint32_t>(len);
+    if (peer != nullptr) *peer = addr;
+    *out = static_cast<NativeSocket>(s);
+    return OkStatus();
+}
+
 Status GetLocalAddress(NativeSocket socket, SocketAddress* out)
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;

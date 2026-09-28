@@ -225,6 +225,22 @@ Status CreateListener(const SocketAddress& address, int backlog, bool non_blocki
     return OkStatus();
 }
 
+Status AcceptConnection(NativeSocket listener, NativeSocket* out, SocketAddress* peer)
+{
+    if (out == nullptr) return SG_INVALID_ARGUMENT;
+    SocketAddress addr;
+    socklen_t len = sizeof(addr.storage);
+    int fd;
+    do {
+        fd = ::accept4(ToFd(listener), reinterpret_cast<sockaddr*>(addr.storage), &len, SOCK_CLOEXEC);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return SG_NETWORK_ERROR;
+    addr.length = static_cast<uint32_t>(len);
+    if (peer != nullptr) *peer = addr;
+    *out = fd;
+    return OkStatus();
+}
+
 Status GetLocalAddress(NativeSocket socket, SocketAddress* out)
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;
