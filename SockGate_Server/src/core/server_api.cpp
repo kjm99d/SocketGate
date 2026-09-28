@@ -451,6 +451,8 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_Create(const SG_ServerOptions* options
 SG_SERVER_API SG_Status SG_CALL SG_Server_Start(SG_Server* server)
 {
     if (server == nullptr) return SG_INVALID_ARGUMENT;
+    // A callback delivered by SG_Server_Stop runs under the lifecycle lock.
+    if (sg::server::InApplicationCallback()) return SG_INVALID_STATE;
     return Guard([&]() { return server->engine->Start(); });
 }
 

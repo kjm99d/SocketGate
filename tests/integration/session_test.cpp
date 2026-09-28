@@ -700,6 +700,50 @@ SG_TEST(Session, CallbacksMayReenterServerApi)
     SG_EXPECT_EQ(ReceiveText(client.get()), std::string("ok"));
 }
 
+namespace {
+
+struct LifecycleProbe {
+    SG_Server* server = nullptr;
+    std::atomic<int> calls{0};
+    std::atomic<int> start{SG_OK};
+    std::atomic<int> stop{SG_OK};
+    std::atomic<int> destroy{SG_OK};
+};
+
+void SG_CALL ProbeLifecycle(void* user, SG_SessionHandle, SG_Status)
+{
+    auto* probe = static_cast<LifecycleProbe*>(user);
+    probe->start = SG_Server_Start(probe->server);
+    probe->stop = SG_Server_Stop(probe->server);
+    probe->destroy = SG_Server_Destroy(probe->server);
+    probe->calls.fetch_add(1);
+}
+
+}  // namespace
+
+SG_TEST(Session, LifecycleCallsAreRefusedInCallbacks)
+{
+    // SG_Server_Stop delivers on_session_closed while holding its lifecycle
+    // lock: Start / Stop / Destroy from there must fail, not self-deadlock.
+    LifecycleProbe probe;
+    SG_ServerCallbacks cb;
+    SG_ServerCallbacks_Init(&cb);
+    cb.user = &probe;
+    cb.on_session_closed = &ProbeLifecycle;
+    TestServer server;
+    server.configure = [&](SG_ServerOptions& o) { o.callbacks = &cb; };
+    server.Start();
+    probe.server = server.server;
+    ClientPtr client(NewClient());
+    server.Register(client.get());
+    ConnectAndAuth(client.get(), server.port);
+    SG_ASSERT_OK(SG_Server_Stop(server.server));  // closes the session on this thread
+    SG_EXPECT_EQ(probe.calls.load(), 1);
+    SG_EXPECT_EQ(probe.start.load(), int{SG_INVALID_STATE});
+    SG_EXPECT_EQ(probe.stop.load(), int{SG_INVALID_STATE});
+    SG_EXPECT_EQ(probe.destroy.load(), int{SG_INVALID_STATE});
+}
+
 SG_TEST(Session, ReplyToUnknownRequestIsRejectedLocally)
 {
     TestServer server;
