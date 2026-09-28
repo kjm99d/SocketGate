@@ -39,11 +39,16 @@
  * failing SG_Server_Send) and on the internal timer thread (expiry, idle
  * timeout). The log callback is the exception: it may run while internal
  * locks are held, so it must only record the message and never call a
- * SockGate function. Callbacks for one session are serialised and ordered;
- * callbacks for different sessions may run concurrently. Every API function
- * except SG_Server_Start, SG_Server_Stop and SG_Server_Destroy may be called
- * from a callback, including for the session being processed. A slow on_message callback
- * applies backpressure: reading from that session pauses until it returns.
+ * SockGate function. Callbacks for one session are serialised and ordered,
+ * with one exception: on_authorize for a re-authentication (the client's
+ * SG_Client_Refresh) runs on an I/O thread outside that order and may overlap
+ * the same session's on_message and on_session_closed, so per-session data it
+ * uses must be synchronised and must not be freed while it runs. Callbacks for
+ * different sessions may run concurrently. Every API function except
+ * SG_Server_Start, SG_Server_Stop and SG_Server_Destroy may be called from a
+ * callback, including for the session being processed. A slow on_message
+ * callback applies backpressure: reading from that session pauses until it
+ * returns.
  */
 #ifndef SOCKGATE_SERVER_H
 #define SOCKGATE_SERVER_H
