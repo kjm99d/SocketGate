@@ -18,12 +18,23 @@ function(sockgate_add_test name)
     set_tests_properties(${name} PROPERTIES LABELS "${ARG_LABEL}" TIMEOUT 300)
 endfunction()
 
+# Runtime test PKI and helpers (no key material is ever committed).
+add_library(sg_test_support STATIC support/test_pki.cpp)
+target_include_directories(sg_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sg_test_support PUBLIC sg_test_framework sockgate_common)
+sockgate_configure_target(sg_test_support TEST)
+
 sockgate_add_test(sg_unit_common
     LABEL unit
-    SOURCES unit/core_test.cpp
+    SOURCES unit/core_test.cpp unit/crypto_test.cpp
     LIBS sockgate_common)
+
+sockgate_add_test(sg_unit_tls
+    LABEL unit
+    SOURCES unit/tls_test.cpp
+    LIBS sg_test_support)
 
 sockgate_add_test(sg_integration_transport
     LABEL integration
-    SOURCES integration/transport_test.cpp
-    LIBS sockgate_client_core sockgate_server_core)
+    SOURCES integration/transport_test.cpp integration/tls_transport_test.cpp
+    LIBS sg_test_support sockgate_client_core sockgate_server_core)

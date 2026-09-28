@@ -4,15 +4,19 @@
 set(SG_COMMON_SOURCES
     src/sockgate_common/core/bytes.cpp
     src/sockgate_common/core/log.cpp
+    src/sockgate_common/crypto/openssl_crypto.cpp
+    src/sockgate_common/tls/openssl_tls.cpp
 )
 
 if(SOCKGATE_PLATFORM STREQUAL "windows")
     list(APPEND SG_COMMON_SOURCES
         src/sockgate_common/platform/windows/socket_win.cpp
+        src/sockgate_common/platform/windows/trust_store_win.cpp
     )
 else()
     list(APPEND SG_COMMON_SOURCES
         src/sockgate_common/platform/linux/socket_posix.cpp
+        src/sockgate_common/platform/linux/trust_store_linux.cpp
     )
 endif()
 
