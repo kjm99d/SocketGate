@@ -133,14 +133,18 @@ jobs:
       - name: Consumer (find_package)
         shell: bash
         run: |
-          extra=""
+          extra=()
           if [ "$RUNNER_OS" = "Windows" ]; then
-            extra="-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DVCPKG_INSTALLED_DIR=$GITHUB_WORKSPACE/vcpkg_installed"
+            # msvc-dev-cmd points VCPKG_ROOT at Visual Studio's copy (a path with spaces), and CMake
+            # wants forward slashes: build each argument as one quoted word.
+            vcpkg_root="$(cygpath -m "$VCPKG_ROOT")"
+            workspace="$(cygpath -m "$GITHUB_WORKSPACE")"
+            extra=("-DCMAKE_TOOLCHAIN_FILE=$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                   "-DVCPKG_TARGET_TRIPLET=x64-windows-static-md"
+                   "-DVCPKG_INSTALLED_DIR=$workspace/vcpkg_installed")
           fi
-          # The Windows VCPKG_ROOT path uses backslashes; CMake wants forward slashes.
-          if [ "$RUNNER_OS" = "Windows" ]; then extra="${extra//\\//}"; fi
           cmake -S tests/package -B build-consumer -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sockgate" $extra
+                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sockgate" "${extra[@]}"
           cmake --build build-consumer
           # RUNNER_TEMP is a Windows path (D:\a\_temp) there: its ':' would split PATH.
           prefix="$RUNNER_TEMP/sockgate"
