@@ -61,7 +61,7 @@ SG_TRY(tls->Write(frame));
 
 ### 1.3 Common 을 수정할 때의 규칙
 
-- 설계 문서를 먼저 고친다 ([docs/README.md](../docs/README.md)). wire format 변경은 [04](../docs/design/04-protocol-specification.md) 와
+- 설계 문서를 먼저 고친다 ([docs/README.md](../docs/README.ko.md)). wire format 변경은 [04](../docs/design/04-protocol-specification.md) 와
   [PROTOCOL.md](PROTOCOL.md) 를 함께 갱신한다.
 - 실패 가능한 함수는 `sg::Status` 를 반환하고 결과를 무시하지 않는다 (`SG_TRY`, 의도적 무시는 `IgnoreError()`).
 - 비밀값은 `SecureBytes` 에 두거나 사용 후 `SecureZero` 로 지운다. 비밀 비교는 `ConstantTimeEqual`.

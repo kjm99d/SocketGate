@@ -1,86 +1,92 @@
 # SockGate
 
-애플리케이션에 임베드하는 **네트워크 인증 게이트** C/C++ 라이브러리 (0.1.0, 미릴리스).
-클라이언트 설치본마다 고유한 비대칭 키로 서버에 자신을 증명하고, 서버는 인증·라이선스·정책을
-모두 서버 쪽에서 결정한다. 이후 트래픽은 TLS 1.3 위의 순서 번호·(선택) AEAD 로 보호된 채널로 오간다.
+**English** | [한국어](README.ko.md) | [日本語](README.ja.md)
+
+A C/C++ **network authentication gate** library that you embed in your application (0.1.0, unreleased).
+Each client installation proves itself to the server with its own unique asymmetric key, and the server makes every
+authentication, license, and policy decision on the server side. After that, traffic runs over TLS 1.3 with every
+frame protected by a sequence number and an AES-256-GCM authentication tag; encrypting the payload as well (AEAD) is
+optional.
 
 ```c
-#include <sockgate/client.h>   /* Windows 와 Linux 에서 같은 API */
+#include <sockgate/client.h>   /* same API on Windows and Linux */
 ```
 
-## 구성
+## Components
 
-| 프로젝트 | 역할 | 문서 |
+| Project | Role | Documents |
 |---|---|---|
-| [SockGate_Client](SockGate_Client/README.md) | 애플리케이션에 넣는 클라이언트 라이브러리 (`SockGate::Client`) | README, ARCHITECTURE, THREAT_MODEL, PROTOCOL, SECURITY, BUILD, INTEGRATION, CHANGELOG |
-| [SockGate_Server](SockGate_Server/README.md) | 인증 게이트 서버 라이브러리 (`SockGate::Server`) | 〃 |
-| [SockGate_Common](SockGate_Common/README.md) | 두 라이브러리가 공유하는 프로토콜·암호·TLS·직렬화 계층과 공용 헤더 | 〃 |
+| [SockGate_Client](SockGate_Client/README.md) | Client library that goes into your application (`SockGate::Client`) | README, ARCHITECTURE, THREAT_MODEL, PROTOCOL, SECURITY, BUILD, INTEGRATION, CHANGELOG |
+| [SockGate_Server](SockGate_Server/README.md) | Authentication gate server library (`SockGate::Server`) | Same |
+| [SockGate_Common](SockGate_Common/README.md) | Protocol, cryptography, TLS, and serialization layer and common headers shared by both libraries | Same |
 
-설계 문서: [docs/design](docs/README.md) — 아키텍처, 위협 모델, 신뢰 경계, 프로토콜, 핸드셰이크,
-키·세션 수명주기, 공개 C API, 플랫폼 계층, 의존성, **보장하지 않는 것**.
+Design documents: [docs/design](docs/README.md) — architecture, threat model, trust boundary, protocol, handshake,
+key and session lifecycle, public C API, platform layers, dependencies, and **what is not guaranteed**.
+Apart from the READMEs, the per-project documents and the design documents are written in Korean.
 
-## 보안 요약
+## Security summary
 
-- **TLS 1.3 기본**, TLS 1.2 는 명시적으로 허용할 때만 (EMS 필수). 인증서 체인·호스트명·유효기간 검증,
-  선택적 다중 SPKI pinning, 선택적 서버 proof key 서명.
-- **설치본별 키**: TPM(Windows CNG Platform Crypto Provider / Linux TPM2), CNG Software KSP(non-exportable),
-  DPAPI·0600 파일 저장소. 바이너리에 비밀 없음. installation id 는 공개키에서 유도.
-- **Challenge-response**: 1회용 challenge, TLS channel binding 과 transcript 에 대한 서명 — 릴레이·재전송 방지.
-- **서버가 결정**: 클라이언트가 보내는 product·license·feature·integrity 는 모두 *주장*이다.
-  granted = requested ∩ license, 라이선스 만료가 세션 수명 상한, 폐기는 즉시 세션 종료.
-- **엄격한 파서**: big-endian 바이너리 프로토콜, 단계별 헤더 규칙, 인증 전 크기 상한, fuzzing.
-- **DoS 완화**: 연결 수 상한과 별도의 인증 전 연결 수 상한, 핸드셰이크·idle 타임아웃, 재인증 최소 간격.
-- **프록시 탐지에 의존하지 않음**: MITM 은 인증서 검증·pinning·channel binding 으로 막는다.
-- 하지 않는 것: 자체 암호 알고리즘, 하드코딩된 master secret, 바이너리 내 private key, 클라이언트 boolean 기반 판단.
-  자세한 한계는 [docs/design/13-security-limitations.md](docs/design/13-security-limitations.md).
+- **TLS 1.3 by default**; TLS 1.2 only when explicitly allowed (EMS required). Certificate chain, hostname, and validity
+  period verification, optional multiple SPKI pinning, optional server proof key signature.
+- **Per-installation keys**: TPM (Windows CNG Platform Crypto Provider / Linux TPM2), CNG Software KSP (non-exportable),
+  DPAPI / 0600 file storage. No secrets in the binary. The installation id is derived from the public key.
+- **Challenge-response**: one-time challenge, signature over the TLS channel binding and the transcript — prevents relay and replay.
+- **The server decides**: the product, license, feature, and integrity values the client sends are all *claims*.
+  granted = requested ∩ license, license expiry caps the session lifetime, and revocation ends sessions immediately.
+- **Strict parser**: big-endian binary protocol, per-stage header rules, pre-authentication size limits, fuzzing.
+- **DoS mitigation**: a connection limit plus a separate limit on unauthenticated connections, handshake and idle timeouts,
+  minimum re-authentication interval.
+- **No reliance on proxy detection**: certificate verification, pinning, and channel binding stop MITM.
+- What it does not do: custom cryptographic algorithms, hardcoded master secrets, private keys in the binary, decisions based
+  on client booleans. For the detailed limitations, see [docs/design/13-security-limitations.md](docs/design/13-security-limitations.md).
 
-## 빠른 시작
+## Quick start
 
 ```sh
-# Windows (Developer PowerShell, VCPKG_ROOT 설정)          # Linux (libssl-dev, ninja, cmake)
+# Windows (Developer PowerShell, VCPKG_ROOT set)             # Linux (libssl-dev, ninja, cmake)
 cmake --preset windows-msvc-release                          cmake --preset linux-gcc-release
 cmake --build --preset windows-msvc-release                  cmake --build --preset linux-gcc-release
 ctest --preset windows-msvc-release                          ctest --preset linux-gcc-release
 ```
 
-개발용 인증서로 예제를 돌려 보기 (`out/build/<preset>/bin`):
+Run the examples with development certificates (`out/build/<preset>/bin`):
 
 ```sh
-sg_admin dev-pki ./dev                        # 개발 전용 CA + localhost 서버 인증서, SPKI pin 출력
+sg_admin dev-pki ./dev                        # development-only CA + localhost server certificate; prints the SPKI pin
 sg_admin token-key ./dev/token.key
 sg_echo_server --cert dev/server.crt --key dev/server.key --port 7443 \
                --registry dev/registry.bin --token-key dev/token.key --issue-token sockgate-echo
-# 서버가 출력한 1회용 enrollment token 을 dev/token.txt 에 저장한 뒤 (명령줄에는 넣지 않는다):
+# Save the one-time enrollment token the server prints to dev/token.txt (do not put it on the command line), then:
 sg_echo_client --host localhost --port 7443 --ca dev/ca.crt --pin <SPKI pin> \
                --key-dir dev/keys --enroll-file dev/token.txt
 ```
 
-서버는 실행 중 registry·license 파일을 잠근다(`<path>.lock`). `sg_admin` 으로 이 파일을 고칠 때는 서버를 멈춘다.
+While running, the server locks the registry and license files (`<path>.lock`). Stop the server before you modify these files with `sg_admin`.
 
-설치 후 다른 CMake 프로젝트에서:
+After installing, from another CMake project:
 
 ```cmake
 find_package(SockGate 0.1 REQUIRED)
-target_link_libraries(app PRIVATE SockGate::Client)   # 또는 SockGate::Server
+target_link_libraries(app PRIVATE SockGate::Client)   # or SockGate::Server
 ```
 
-## 저장소 구조
+## Repository layout
 
 ```text
-SockGate_Common/   공용 헤더(error/types/version/export) + 내부 공용 라이브러리
-SockGate_Client/   클라이언트 라이브러리 (C API: include/sockgate/client.h, config.h)
-SockGate_Server/   서버 라이브러리 (C API: include/sockgate/server.h)
-examples/          C 예제: sg_echo_server, sg_echo_client
-tools/             sg_admin: 오프라인 관리 (pin, 토큰, 라이선스, 클라이언트, dev PKI)
-tests/             unit / protocol / security / integration 테스트 (CTest 라벨), 패키지 소비자
-fuzz/              libFuzzer 대상 + CTest 용 결정적 mutation 드라이버
-cmake/             옵션, 컴파일러 hardening, sanitizer, 설치/패키지
-docs/design/       설계 문서 01–13
-.github/workflows/ CI (Windows/Linux/ARM64, sanitizer, TPM2(swtpm), 패키지, 컨테이너, fuzz)
+SockGate_Common/   common headers (error/types/version/export) + internal common library
+SockGate_Client/   client library (C API: include/sockgate/client.h, config.h)
+SockGate_Server/   server library (C API: include/sockgate/server.h)
+examples/          C examples: sg_echo_server, sg_echo_client
+tools/             sg_admin: offline administration (pins, tokens, licenses, clients, dev PKI)
+tests/             unit / protocol / security / integration tests (CTest labels), package consumer
+fuzz/              libFuzzer targets + deterministic mutation driver for CTest
+cmake/             options, compiler hardening, sanitizers, install/package
+docs/design/       design documents 01–13
+.github/workflows/ CI (Windows/Linux/ARM64, sanitizers, TPM2(swtpm), package, container, fuzz)
 ```
 
-## 상태
+## Status
 
-0.1.0 은 첫 릴리스 전이며 ABI 기준선이다. 0.x 동안은 minor 버전마다 ABI 가 바뀔 수 있다
-(soname `libsockgate_*.so.0.1`, CMake 패키지 호환성 SameMinorVersion). 변경 이력은 각 프로젝트의 CHANGELOG.md 를 본다.
-취약점은 공개 이슈가 아니라 메인테이너에게 비공개로 보고한다.
+0.1.0 is not yet released and is the ABI baseline. During 0.x, the ABI can change with every minor version
+(soname `libsockgate_*.so.0.1`, CMake package compatibility SameMinorVersion). For the change history, see each project's CHANGELOG.md.
+Report vulnerabilities privately to the maintainers, not in public issues.

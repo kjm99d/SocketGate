@@ -1,55 +1,59 @@
 # SockGate_Common
 
-> SockGate 의 공통 구현 계층. **내부 정적 라이브러리**이며 애플리케이션이 직접 링크하는 대상이 아니다.
-> 공개 API 는 `SockGate_Client` (`sockgate/client.h`) 와 `SockGate_Server` (`sockgate/server.h`) 의 C ABI 뿐이다.
+**English** | [한국어](README.ko.md) | [日本語](README.ja.md)
 
-## 1. 역할
+The detailed documents and the design documents referenced below are written in Korean.
 
-SockGate_Common 은 두 가지를 제공한다.
+> The common implementation layer of SockGate. It is an **internal static library**, not something applications link to directly.
+> The only public APIs are the C ABIs of `SockGate_Client` (`sockgate/client.h`) and `SockGate_Server` (`sockgate/server.h`).
 
-1. **내부 정적 라이브러리 `sockgate_common`** (CMake alias `SockGate::Common`)
-   - 보안에 민감한 코드(직렬화, 프레임/메시지 파서, 암호 프리미티브, TLS 엔진, 소켓 추상화)를 **한 벌만** 둔다.
-     Client 와 Server 가 같은 파서·같은 검증 코드를 쓰므로 한쪽만 고쳐지는 결함이 생기지 않는다
+## 1. Role
+
+SockGate_Common provides two things.
+
+1. **Internal static library `sockgate_common`** (CMake alias `SockGate::Common`)
+   - Holds **a single copy** of the security-sensitive code (serialization, frame/message parsers, cryptographic primitives, TLS engine, socket abstraction).
+     Because Client and Server use the same parsers and the same validation code, a fix can never land on only one side
      ([01-architecture.md §2](../docs/design/01-architecture.md)).
-   - `sockgate_client_core` 와 `sockgate_server_core` 가 `PUBLIC` 으로 링크한다. 테스트와 fuzz 타깃도 직접 링크한다.
-   - `src/sockgate_common/**` 헤더는 내부 전용이다. 설치되지 않으며 ABI/API 안정성을 보장하지 않는다.
-   - 설치 패키지(`find_package(SockGate)`)에서는 shared 빌드에 포함되지 않고, static 빌드에서만 Client/Server archive 의
-     의존성으로 `SockGate::Common` 이 export 된다. 애플리케이션이 직접 링크하는 대상은 아니다 ([BUILD.md §1](BUILD.md)).
-2. **공용 public C 헤더** (`include/sockgate/`)
-   - Client/Server 양쪽 공개 헤더가 include 하는 공통 정의. Client/Server 패키지와 함께 설치된다
-     (설치되는 public 헤더는 이 4 개와 Client 3 개, Server 1 개, 모두 8 개뿐이다).
+   - `sockgate_client_core` and `sockgate_server_core` link it as `PUBLIC`. The test and fuzz targets also link it directly.
+   - The `src/sockgate_common/**` headers are internal only. They are not installed and have no ABI/API stability guarantee.
+   - In the installed package (`find_package(SockGate)`), it is not included in shared builds; only in static builds is `SockGate::Common`
+     exported, as a dependency of the Client/Server archives. Applications do not link to it directly ([BUILD.md §1](BUILD.md)).
+2. **Common public C headers** (`include/sockgate/`)
+   - Common definitions that the public headers of both Client and Server include. They are installed with the Client/Server packages
+     (the installed public headers are only these 4 plus 3 from Client and 1 from Server, 8 in total).
 
-| 헤더 | 내용 |
+| Header | Contents |
 |---|---|
-| `sockgate/version.h` | `SOCKGATE_VERSION_MAJOR/MINOR/PATCH` (현재 0.1.0), `SOCKGATE_API_VERSION` (1), `SOCKGATE_PROTOCOL_VERSION` (1). 최상위 `CMakeLists.txt` 가 이 파일에서 프로젝트 버전을 읽는다 (버전의 단일 원천) |
+| `sockgate/version.h` | `SOCKGATE_VERSION_MAJOR/MINOR/PATCH` (currently 0.1.0), `SOCKGATE_API_VERSION` (1), `SOCKGATE_PROTOCOL_VERSION` (1). The top-level `CMakeLists.txt` reads the project version from this file (the single source of truth for the version) |
 | `sockgate/export.h` | `SG_CLIENT_API` / `SG_SERVER_API`, `SG_CALL`, `SG_EXTERN_C_BEGIN/END` |
-| `sockgate/error.h` | `SG_Status` (`int32_t`), 에러 코드 0–29, `SG_StatusString()` (`static inline`) |
-| `sockgate/types.h` | ID/해시/공개키 구조체, 로그 레벨·콜백, 클라이언트 상태, 세션 정책, integrity 관측 비트, `SG_MessageInfo` |
+| `sockgate/error.h` | `SG_Status` (`int32_t`), error codes 0–29, `SG_StatusString()` (`static inline`) |
+| `sockgate/types.h` | ID/hash/public key structs, log levels and callback, client states, session policy, integrity observation bits, `SG_MessageInfo` |
 
-에러 코드와 ABI 규칙은 [INTEGRATION.md](INTEGRATION.md) 에 정리한다.
+Error codes and ABI rules are summarized in [INTEGRATION.md](INTEGRATION.md).
 
-## 2. 구성
+## 2. Components
 
-| 모듈 | 네임스페이스 | 내용 |
+| Module | Namespace | Contents |
 |---|---|---|
-| `core/` | `sg` | `Status` (`[[nodiscard]]`), `ToPublicStatus`, `SecureBytes`/`SecureZero`/`ConstantTimeEqual`, monotonic clock/`Deadline`, 로그 콜백 `Logger`, ABI 보조(`abi.h`) |
-| `serialization/` | `sg::ser` | big-endian `Reader`/`Writer`, 엄격한 TLV 파서, base64url, 프로토콜 문자열(UTF-8) 검증 |
-| `protocol/` | `sg::proto` | wire 상수, 48-byte `FrameHeader` 코덱, `FrameDecoder`, 단계별 규칙 `CheckHeaderForState`, 메시지 코덱, transcript/키 유도, enrollment token, 인증 후 프레임 보호 `ProtectedChannel` |
-| `crypto/` | `sg::crypto` | OpenSSL 3 EVP 래퍼: SHA-256, HMAC-SHA256, HKDF-SHA256, AES-256-GCM, ECDSA P-256 (P1363), CSPRNG, `SoftwareP256Key` |
-| `tls/` | `sg::tls` | sans-IO TLS 엔진 (`ITlsProvider` / `ITlsContext` / `ITlsEngine`, OpenSSL memory BIO), 인증서·hostname 검증, SPKI pinning, exporter / 채널 바인딩, 오래된 번들 OpenSSL 판정 |
-| `net/` | `sg::net` | 바이트 스트림 추상화 `ITransport`, `Endpoint` |
-| `platform/` | `sg::platform` | Winsock2 / POSIX 소켓 원시 기능, 주소 해석, OS trust store 로드 |
+| `core/` | `sg` | `Status` (`[[nodiscard]]`), `ToPublicStatus`, `SecureBytes`/`SecureZero`/`ConstantTimeEqual`, monotonic clock/`Deadline`, log callback `Logger`, ABI helpers (`abi.h`) |
+| `serialization/` | `sg::ser` | big-endian `Reader`/`Writer`, strict TLV parser, base64url, protocol string (UTF-8) validation |
+| `protocol/` | `sg::proto` | wire constants, 48-byte `FrameHeader` codec, `FrameDecoder`, per-stage rules `CheckHeaderForState`, message codecs, transcript/key derivation, enrollment token, post-authentication frame protection `ProtectedChannel` |
+| `crypto/` | `sg::crypto` | OpenSSL 3 EVP wrappers: SHA-256, HMAC-SHA256, HKDF-SHA256, AES-256-GCM, ECDSA P-256 (P1363), CSPRNG, `SoftwareP256Key` |
+| `tls/` | `sg::tls` | sans-IO TLS engine (`ITlsProvider` / `ITlsContext` / `ITlsEngine`, OpenSSL memory BIO), certificate and hostname verification, SPKI pinning, exporter / channel binding, detection of outdated bundled OpenSSL |
+| `net/` | `sg::net` | byte stream abstraction `ITransport`, `Endpoint` |
+| `platform/` | `sg::platform` | Winsock2 / POSIX socket primitives, address resolution, OS trust store loading |
 
-모듈 간 의존 방향과 설계는 [ARCHITECTURE.md](ARCHITECTURE.md), wire format 은 [PROTOCOL.md](PROTOCOL.md) 를 본다.
+For the dependency direction between modules and the design, see [ARCHITECTURE.md](ARCHITECTURE.md); for the wire format, see [PROTOCOL.md](PROTOCOL.md).
 
-## 3. 디렉터리
+## 3. Directory
 
 ```text
 SockGate_Common/
 ├── CMakeLists.txt                     target: sockgate_common (STATIC), alias SockGate::Common
-├── include/sockgate/                  공용 public C 헤더 (C/C++ 양쪽에서 컴파일)
+├── include/sockgate/                  common public C headers (compile as both C and C++)
 │   ├── error.h  export.h  types.h  version.h
-└── src/sockgate_common/               내부 구현 (설치하지 않음)
+└── src/sockgate_common/               internal implementation (not installed)
     ├── core/            status.h  bytes.h/.cpp  clock.h  log.h/.cpp  abi.h
     ├── serialization/   byte_order.h  reader.*  writer.*  tlv.*  base64.*
     ├── protocol/        constants.h  frame.*  rules.*  messages.*  transcript.*
@@ -62,29 +66,29 @@ SockGate_Common/
         └── linux/       socket_posix.cpp  trust_store_linux.cpp
 ```
 
-- 내부 include 형태: `#include "sockgate_common/protocol/frame.h"`. public 헤더: `#include <sockgate/types.h>`.
-- OS 헤더는 `platform/windows`, `platform/linux` 아래 파일만 include 한다. 해당하지 않는 플랫폼 파일은
-  CMake 가 소스 목록에서 뺀다 (`SOCKGATE_PLATFORM`).
+- Internal include form: `#include "sockgate_common/protocol/frame.h"`. Public headers: `#include <sockgate/types.h>`.
+- Only files under `platform/windows` and `platform/linux` include OS headers. CMake removes the files for the other platform
+  from the source list (`SOCKGATE_PLATFORM`).
 
-## 4. 의존성
+## 4. Dependencies
 
-- OpenSSL ≥ 3.0 (`OpenSSL::SSL`, `OpenSSL::Crypto`), `Threads::Threads` — `PUBLIC` 링크.
+- OpenSSL ≥ 3.0 (`OpenSSL::SSL`, `OpenSSL::Crypto`), `Threads::Threads` — linked as `PUBLIC`.
 - Windows: `ws2_32`, `crypt32`.
-- 그 밖의 외부 라이브러리는 없다. 상세는 [BUILD.md](BUILD.md), [12-dependencies.md](../docs/design/12-dependencies.md).
+- There are no other external libraries. For details, see [BUILD.md](BUILD.md) and [12-dependencies.md](../docs/design/12-dependencies.md).
 
-## 5. 문서
+## 5. Documents
 
-| 문서 | 내용 |
+| Document | Contents |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 모듈 구조, 에러 모델, 메모리 소거, TLS 엔진, 프레임 디코더, 채널 보호, 플랫폼 추상화 |
-| [THREAT_MODEL.md](THREAT_MODEL.md) | 파서/암호 계층에 대한 위협과 대응, 잔여 위험 |
-| [PROTOCOL.md](PROTOCOL.md) | wire format 요약 (헤더, 메시지, TLV, 단계 규칙, transcript, 키 유도, token) |
-| [SECURITY.md](SECURITY.md) | 암호 선택, TLS 설정, 소거, 상수 시간 비교, 파서 강화, fuzzing, 취약점 보고 |
-| [BUILD.md](BUILD.md) | 빌드, OpenSSL 요구사항, 프리셋, fuzzer, 테스트 |
-| [INTEGRATION.md](INTEGRATION.md) | SockGate 개발자용: 모듈 사용법, 메시지/TLV 추가, 공용 헤더, ABI 규칙 |
-| [CHANGELOG.md](CHANGELOG.md) | 변경 이력 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Module structure, error model, memory wiping, TLS engine, frame decoder, channel protection, platform abstraction |
+| [THREAT_MODEL.md](THREAT_MODEL.md) | Threats to the parser/cryptography layers and mitigations, residual risks |
+| [PROTOCOL.md](PROTOCOL.md) | Wire format summary (header, messages, TLV, stage rules, transcript, key derivation, token) |
+| [SECURITY.md](SECURITY.md) | Cryptographic choices, TLS configuration, wiping, constant-time comparison, parser hardening, fuzzing, vulnerability reporting |
+| [BUILD.md](BUILD.md) | Build, OpenSSL requirements, presets, fuzzers, tests |
+| [INTEGRATION.md](INTEGRATION.md) | For SockGate developers: using the modules, adding messages/TLVs, common headers, ABI rules |
+| [CHANGELOG.md](CHANGELOG.md) | Change history |
 
-설계 기준 문서는 [docs/design](../docs/design/) (01–13) 이다. 특히
+The reference design documents are in [docs/design](../docs/design/) (01–13). In particular,
 [01 Architecture](../docs/design/01-architecture.md), [04 Protocol Specification](../docs/design/04-protocol-specification.md),
 [05 Handshake Sequence](../docs/design/05-handshake-sequence.md), [08 Directory Structure](../docs/design/08-directory-structure.md),
-[09 Public C API](../docs/design/09-public-c-api.md) 가 이 라이브러리와 직접 관련된다.
+and [09 Public C API](../docs/design/09-public-c-api.md) relate directly to this library.
