@@ -169,6 +169,14 @@
   ],
   "testPresets": [
     { "name": "test-base", "hidden": true, "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error", "timeout": 300 } },
+    {
+      "name": "test-sanitizers", "hidden": true, "inherits": "test-base",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
+        "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1"
+      }
+    },
     { "name": "windows-msvc-debug",      "inherits": "test-base", "configurePreset": "windows-msvc-debug" },
     { "name": "windows-msvc-release",    "inherits": "test-base", "configurePreset": "windows-msvc-release" },
     { "name": "windows-clangcl-debug",   "inherits": "test-base", "configurePreset": "windows-clangcl-debug" },
@@ -178,8 +186,8 @@
     { "name": "linux-gcc-release",       "inherits": "test-base", "configurePreset": "linux-gcc-release" },
     { "name": "linux-clang-debug",       "inherits": "test-base", "configurePreset": "linux-clang-debug" },
     { "name": "linux-clang-release",     "inherits": "test-base", "configurePreset": "linux-clang-release" },
-    { "name": "linux-gcc-asan",          "inherits": "test-base", "configurePreset": "linux-gcc-asan" },
-    { "name": "linux-clang-asan",        "inherits": "test-base", "configurePreset": "linux-clang-asan" },
-    { "name": "linux-clang-tsan",        "inherits": "test-base", "configurePreset": "linux-clang-tsan" }
+    { "name": "linux-gcc-asan",          "inherits": "test-sanitizers", "configurePreset": "linux-gcc-asan" },
+    { "name": "linux-clang-asan",        "inherits": "test-sanitizers", "configurePreset": "linux-clang-asan" },
+    { "name": "linux-clang-tsan",        "inherits": "test-sanitizers", "configurePreset": "linux-clang-tsan" }
   ]
 }
