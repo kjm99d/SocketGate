@@ -7,10 +7,14 @@
 #include "sockgate_common/crypto/crypto.h"
 #include "sockgate_common/protocol/transcript.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <new>
 #include <string>
+#include <system_error>
 
 struct SG_Server {
     // Declared before `engine`: the engine's callbacks point into this copy,
@@ -93,6 +97,36 @@ void FillSessionInfo(const sg::server::SessionSnapshot& s, SG_ServerSessionInfo*
     CopyField(out->peer_address, sizeof(out->peer_address), s.peer_address);
     CopyField(out->product_id, sizeof(out->product_id), s.product_id);
     CopyField(out->license_id, sizeof(out->license_id), s.license_id);
+    if (SG_HAS_FIELD(out, SG_ServerSessionInfo, license_status)) {
+        out->license_status = static_cast<uint32_t>(s.license_status);
+    }
+}
+
+// True if both paths (existing or not) resolve to the same file.
+bool SameFile(const std::string& a, const std::string& b)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec_a;
+    std::error_code ec_b;
+    const fs::path pa = fs::u8path(a);
+    const fs::path pb = fs::u8path(b);
+    if (fs::exists(pa, ec_a) && fs::exists(pb, ec_b)) {
+        std::error_code ec;
+        if (fs::equivalent(pa, pb, ec)) return true;
+    }
+    std::error_code ec1;
+    std::error_code ec2;
+    std::string ca = fs::weakly_canonical(pa, ec1).u8string();
+    std::string cb = fs::weakly_canonical(pb, ec2).u8string();
+    if (ec1 || ec2) return a == b;
+#ifdef _WIN32
+    auto lower = [](std::string& v) {
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    };
+    lower(ca);
+    lower(cb);
+#endif
+    return ca == cb;
 }
 
 // Bridges engine callbacks to the application's C callbacks.
@@ -128,6 +162,8 @@ sg::server::EngineCallbacks BridgeCallbacks(SG_Server* server)
             static const char kEmpty[] = "";
             req.registered_product_id = r.record != nullptr ? r.record->product_id.c_str() : kEmpty;
             req.registered_license_id = r.record != nullptr ? r.record->license_id.c_str() : kEmpty;
+            req.license_status = static_cast<uint32_t>(r.license_status);
+            req.license_features = r.license_features;
 
             SG_AuthDecision dec;
             std::memset(&dec, 0, sizeof(dec));
@@ -223,8 +259,11 @@ Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::En
     cfg->tls.allow_tls12 = (flags & SG_SERVER_OPT_ALLOW_TLS12) != 0;
     cfg->require_app_encryption = (flags & SG_SERVER_OPT_REQUIRE_APP_ENCRYPTION) != 0;
     cfg->handshake.allow_enrollment = (flags & SG_SERVER_OPT_ALLOW_ENROLLMENT) != 0;
+    cfg->require_license = (flags & SG_SERVER_OPT_REQUIRE_LICENSE) != 0;
+    cfg->allow_license_activation = (flags & SG_SERVER_OPT_LICENSE_ACTIVATION) != 0;
     // Refuse options this build cannot honour instead of silently ignoring them.
-    if ((flags & ~(SG_SERVER_OPT_ALLOW_TLS12 | SG_SERVER_OPT_REQUIRE_APP_ENCRYPTION | SG_SERVER_OPT_ALLOW_ENROLLMENT)) != 0) {
+    if ((flags & ~(SG_SERVER_OPT_ALLOW_TLS12 | SG_SERVER_OPT_REQUIRE_APP_ENCRYPTION | SG_SERVER_OPT_ALLOW_ENROLLMENT |
+                   SG_SERVER_OPT_REQUIRE_LICENSE | SG_SERVER_OPT_LICENSE_ACTIVATION)) != 0) {
         return SG_NOT_SUPPORTED;
     }
 
@@ -277,6 +316,12 @@ Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::En
     if (SG_HAS_FIELD(o, SG_ServerOptions, log_level)) {
         cfg->logger = sg::Logger(o->log_callback, o->log_user, o->log_level);
     }
+    if (SG_HAS_FIELD(o, SG_ServerOptions, license_path) && !CopyCString(o->license_path, 4096, &cfg->license_path)) {
+        return SG_INVALID_ARGUMENT;
+    }
+    if (!cfg->registry_path.empty() && !cfg->license_path.empty() && SameFile(cfg->registry_path, cfg->license_path)) {
+        return SG_INVALID_ARGUMENT;
+    }
     return sg::OkStatus();
 }
 
@@ -322,6 +367,22 @@ SG_SERVER_API void SG_CALL SG_EnrollmentTokenRequest_Init(SG_EnrollmentTokenRequ
     std::memset(request, 0, sizeof(*request));
     request->size = sizeof(*request);
     request->version = SG_ENROLLMENT_TOKEN_REQUEST_VERSION;
+}
+
+SG_SERVER_API void SG_CALL SG_LicenseRecord_Init(SG_LicenseRecord* record)
+{
+    if (record == nullptr) return;
+    std::memset(record, 0, sizeof(*record));
+    record->size = sizeof(*record);
+    record->version = SG_LICENSE_RECORD_VERSION;
+}
+
+SG_SERVER_API void SG_CALL SG_LicenseInfo_Init(SG_LicenseInfo* info)
+{
+    if (info == nullptr) return;
+    std::memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->version = SG_LICENSE_INFO_VERSION;
 }
 
 SG_SERVER_API void SG_CALL SG_ServerSessionInfo_Init(SG_ServerSessionInfo* info)
@@ -482,6 +543,68 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_IssueEnrollmentToken(SG_Server* server
         }
         sg::SecureZero(&out[0], out.size());
         return st;
+    });
+}
+
+SG_SERVER_API SG_Status SG_CALL SG_Server_AddLicense(SG_Server* server, const SG_LicenseRecord* license)
+{
+    if (server == nullptr || license == nullptr || license->version == 0 ||
+        !SG_HAS_FIELD(license, SG_LicenseRecord, max_installations)) {
+        return SG_INVALID_ARGUMENT;
+    }
+    return Guard([&]() -> Status {
+        sg::server::LicenseRecord rec;
+        if (!CopyCString(license->license_id, sg::proto::kMaxLicenseIdLength, &rec.license_id) ||
+            !CopyCString(license->product_id, sg::proto::kMaxProductIdLength, &rec.product_id)) {
+            return SG_INVALID_ARGUMENT;
+        }
+        rec.features = license->features;
+        rec.expires_at_ms = license->expires_at_ms;
+        rec.max_installations = license->max_installations;
+        return server->engine->AddLicense(rec);
+    });
+}
+
+SG_SERVER_API SG_Status SG_CALL SG_Server_RevokeLicense(SG_Server* server, const char* license_id)
+{
+    if (server == nullptr || license_id == nullptr) return SG_INVALID_ARGUMENT;
+    return Guard([&]() -> Status {
+        std::string id;
+        if (!CopyCString(license_id, sg::proto::kMaxLicenseIdLength, &id) || id.empty()) return SG_INVALID_ARGUMENT;
+        return server->engine->RevokeLicense(id);
+    });
+}
+
+SG_SERVER_API SG_Status SG_CALL SG_Server_ReleaseLicenseSeat(SG_Server* server, const char* license_id,
+                                                             const SG_InstallationId* installation_id)
+{
+    if (server == nullptr || license_id == nullptr || installation_id == nullptr) return SG_INVALID_ARGUMENT;
+    return Guard([&]() -> Status {
+        std::string id;
+        if (!CopyCString(license_id, sg::proto::kMaxLicenseIdLength, &id) || id.empty()) return SG_INVALID_ARGUMENT;
+        sg::proto::InstallationId iid;
+        std::memcpy(iid.data(), installation_id->bytes, iid.size());
+        return server->engine->ReleaseLicenseSeat(id, iid);
+    });
+}
+
+SG_SERVER_API SG_Status SG_CALL SG_Server_GetLicense(SG_Server* server, const char* license_id, SG_LicenseInfo* info)
+{
+    if (server == nullptr || license_id == nullptr || info == nullptr || !SG_HAS_FIELD(info, SG_LicenseInfo, revoked)) {
+        return SG_INVALID_ARGUMENT;
+    }
+    return Guard([&]() -> Status {
+        std::string id;
+        if (!CopyCString(license_id, sg::proto::kMaxLicenseIdLength, &id) || id.empty()) return SG_INVALID_ARGUMENT;
+        sg::server::LicenseRecord rec;
+        SG_TRY(server->engine->GetLicense(id, &rec));
+        CopyField(info->product_id, sizeof(info->product_id), rec.product_id);
+        info->features = rec.features;
+        info->expires_at_ms = rec.expires_at_ms;
+        info->max_installations = rec.max_installations;
+        info->installations = rec.seats_used;
+        info->revoked = rec.status == sg::server::LicenseStatus::kRevoked ? 1u : 0u;
+        return sg::OkStatus();
     });
 }
 

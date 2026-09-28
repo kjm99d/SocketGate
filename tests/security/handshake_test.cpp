@@ -570,7 +570,17 @@ SG_TEST(Enrollment, ExternalValidator)
     EnrollmentMaterial m;
     m.token_pub = {'o', 'k'};
     m.k_tok = external_k;
-    SG_EXPECT_OK(RunSameSession(server, *ks, "app", ClientHandshakeConfig(), &m).client);
+    ClientHandshakeConfig claims;
+    claims.product_id = "prod";
+    claims.license_id = "PREMIUM";
+    SG_EXPECT_OK(RunSameSession(server, *ks, "app", claims, &m).client);
+    // The validator approved the token, not the license claim: no binding.
+    IdentityInfo id;
+    SG_ASSERT_OK(GetIdentity(*ks, "app", &id));
+    ClientRecord rec;
+    SG_ASSERT_OK(server.registry->Find(id.installation_id, &rec));
+    SG_EXPECT_EQ(rec.product_id, std::string("prod"));
+    SG_EXPECT(rec.license_id.empty());
     m.token_pub = {'n', 'o'};
     auto ks2 = CreateMemoryKeyStore();
     SG_ASSERT_OK(ks2->GenerateKeyPair("app"));

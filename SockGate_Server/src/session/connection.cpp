@@ -186,13 +186,22 @@ Status Connection::HandleClientProofLocked(Lock& lock, const proto::DecodedFrame
     }
     Bytes reply;
     HandshakeOutcome outcome;
+    const uint64_t revocations = engine_->revocation_generation();
     // The handshake calls application code (on_authorize / on_enroll), which
     // may call back into the server API for this very session: never hold
     // mutex_ across it. Only this read-processing thread touches handshake_.
     lock.unlock();
-    const Status st = handshake_.OnClientProof(frame, &reply, &outcome);
+    Status st = handshake_.OnClientProof(frame, &reply, &outcome);
     lock.lock();
     if (closed_) return OkStatus();  // closed meanwhile (timeout, CloseSession, Stop)
+    // Revocation passes only see open sessions; one that raced with this
+    // authorisation is caught here (the session opens under this lock).
+    if (st.ok() && engine_->revocation_generation() != revocations &&
+        !engine_->IsStillAuthorized(outcome.installation_id, outcome.decision)) {
+        // A revocation that ran before the seat was taken could not free it.
+        engine_->ReleaseNewSeat(outcome.installation_id, outcome.decision);
+        st = handshake_.Reject("revoked during authentication", &reply);
+    }
     if (st == SG_AUTH_FAILED) {
         WriteRawLocked(reply).IgnoreError();
         engine_->mutable_stats().auth_failed.fetch_add(1);
@@ -598,8 +607,11 @@ void Connection::SnapshotLocked(SessionSnapshot* out, uint64_t now) const
     out->enrolled = outcome_.enrolled;
     out->peer_address = stream_->PeerAddress();
     out->product_id = outcome_.record.product_id.empty() ? outcome_.hello.product_id : outcome_.record.product_id;
-    out->license_id = !outcome_.decision.license_id.empty() ? outcome_.decision.license_id
-                                                            : outcome_.record.license_id;
+    // Registered or verified licenses only; never a raw client claim.
+    out->license_id = outcome_.decision.license_id;
+    out->license_status = outcome_.decision.license_verified ? LicenseCheck::kValid
+                          : out->license_id.empty()          ? LicenseCheck::kNone
+                                                             : LicenseCheck::kUnknown;
 }
 
 bool Connection::Snapshot(SessionSnapshot* out)
@@ -614,6 +626,13 @@ bool Connection::IsInstallation(const proto::InstallationId& id)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return opened_ && !closed_ && outcome_.installation_id == id;
+}
+
+bool Connection::UsesLicense(const std::string& license_id, const proto::InstallationId* installation)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return opened_ && !closed_ && outcome_.decision.license_id == license_id &&
+           (installation == nullptr || outcome_.installation_id == *installation);
 }
 
 bool Connection::IsAuthenticated()

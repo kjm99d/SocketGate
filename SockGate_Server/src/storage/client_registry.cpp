@@ -77,6 +77,28 @@ public:
         return tokens_.count(token_id) != 0;
     }
 
+    Status BindLicense(const proto::InstallationId& id, const std::string& product_id,
+                       const std::string& license_id) override
+    {
+        if (product_id.empty() || product_id.size() > proto::kMaxProductIdLength || license_id.empty() ||
+            license_id.size() > proto::kMaxLicenseIdLength) {
+            return SG_INVALID_ARGUMENT;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = records_.find(id);
+        if (it == records_.end()) return SG_NOT_FOUND;
+        ClientRecord& rec = it->second;
+        if (rec.status != ClientStatus::kActive) return SG_INVALID_STATE;
+        if (!rec.license_id.empty()) return rec.license_id == license_id ? OkStatus() : Status(SG_ALREADY_EXISTS);
+        if (!rec.product_id.empty() && rec.product_id != product_id) return SG_INVALID_ARGUMENT;
+        const ClientRecord previous = rec;
+        rec.product_id = product_id;
+        rec.license_id = license_id;
+        const Status st = PersistLocked();
+        if (!st.ok()) rec = previous;
+        return st;
+    }
+
     size_t Count() override
     {
         std::lock_guard<std::mutex> lock(mutex_);

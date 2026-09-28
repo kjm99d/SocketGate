@@ -124,6 +124,7 @@ Status ServerHandshake::OnClientHello(const proto::DecodedFrame& frame, const cr
 Status ServerHandshake::Reject(const std::string& reason, Bytes* reply)
 {
     failure_reason_ = reason;
+    phase_ = proto::Phase::kClosed;
     proto::AuthResult result;
     result.result = proto::AuthResultCode::kRejected;
     Bytes payload;
@@ -221,8 +222,12 @@ Status ServerHandshake::VerifyEnrollment(const proto::ClientProof& proof, const 
     record->installation_id = hello_.installation_id;
     record->public_key = hello_.public_key;
     record->status = ClientStatus::kActive;
+    // Built-in tokens carry server-issued bindings. An external validator only
+    // approves the token: the client's license claim is not turned into a
+    // binding here (it goes through authorization like any claim, i.e. it is
+    // only bound by license activation).
     record->product_id = builtin ? claims.product_id : hello_.product_id;
-    record->license_id = builtin ? claims.license_id : hello_.license_id;
+    record->license_id = builtin ? claims.license_id : std::string();
     record->created_at_ms = ctx_->UnixNow();
     proto::TokenId token_id{};
     uint64_t token_expiry = claims.expires_at_ms;

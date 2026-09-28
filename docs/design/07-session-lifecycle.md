@@ -85,10 +85,14 @@ product_id, license_id
 | 수명 80% 경과 | - | `auto_refresh` 설정 시 다음 Send/Receive 호출 경로에서 재인증 시작, 또는 `SG_Client_Refresh` 수동 |
 | idle 초과 | CLOSE(IDLE_TIMEOUT) | `CLOSED` |
 | 재인증 성공 | `expires_at = now + lifetime`, epoch+1 | 동일 |
-| installation 폐기 / 라이선스 폐기 | 해당 세션 즉시 CLOSE(AUTH_FAILED) | `CLOSED`, 다음 API 호출이 `SG_CLOSED` |
+| installation 폐기 / 라이선스 폐기 / 좌석 반납 | 해당 세션 즉시 CLOSE(AUTH_FAILED) | `CLOSED`, 진행 중인 수신은 `SG_SERVER_REJECTED` |
+| 라이선스 조건 변경 | 다음 재인증에서 인가 재평가 (feature 축소, 만료 반영) | 재인증 거부 시 `CLOSED` |
 
 - 세션 수명은 무한일 수 없다 (최대 7일). 장시간 연결은 재인증을 통해 유지한다.
 - 세션 만료 시각은 **라이선스 만료 시각을 넘지 않도록** 잘린다 (`expires_at = min(now + lifetime, license_expires_at)`).
+- 폐기 처리는 **열린 세션**만 순회한다. 인가 콜백 실행 중(아직 열리지 않은) 연결이 폐기를 놓치지 않도록,
+  서버는 폐기 세대 카운터를 인가 전에 기록해 두고, 값이 바뀌었으면 세션을 열기 직전에 registry/license 를
+  다시 확인해 거부한다.
 - idle 판정의 "활동" 은 **검증을 통과한 수신 프레임** 단위(PING 포함)이다. 바이트 단위 수신은 활동으로 보지 않는다
   (느린 전송으로 idle 타이머를 연장하는 것 방지).
 

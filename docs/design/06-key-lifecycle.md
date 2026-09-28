@@ -60,7 +60,10 @@ private key 는 어떤 경로로도 서버에 전송되지 않는다.
 
 - 서버: `SG_Server_RevokeClient(installation_id)` → registry 상태 `REVOKED`, 즉시 저장.
 - 해당 installation 의 **활성 세션은 즉시 종료**된다 (CLOSE(AUTH_FAILED)). 재인증을 기다리지 않는다.
-- `SG_Server_RevokeLicense(license_id)` 도 해당 라이선스로 인가된 세션을 즉시 종료한다.
+- `SG_Server_RevokeLicense(license_id)` 도 해당 라이선스로 인가된 세션을 즉시 종료한다 (폐기는 영구).
+- `SG_Server_ReleaseLicenseSeat(license_id, installation_id)` 는 좌석을 반납하고 그 installation 의 해당
+  라이선스 세션을 종료한다. 재설치로 installation 키가 바뀐 경우 구 installation 의 좌석을 이렇게 회수한다.
+- 인가가 진행 중인 연결과 폐기가 경합해도 세션이 열리기 전에 다시 확인된다 (07 §4).
 
 ### 2.6 삭제
 

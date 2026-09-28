@@ -5,6 +5,27 @@
  * installation keys and every permission (policy, features, lifetime) is
  * decided here, optionally refined by the on_authorize callback.
  *
+ * Built-in authorization (before on_authorize):
+ *  - the installation must be registered and active; its registered product /
+ *    license bindings win, and a client claim contradicting them is denied;
+ *  - the effective license is the registered one (SG_ClientRecord, or the
+ *    enrollment token's). A license id claimed by an installation without a
+ *    binding is an unverified claim (SG_LICENSE_STATUS_UNKNOWN), unless
+ *    SG_SERVER_OPT_LICENSE_ACTIVATION is set: then a claimed license from
+ *    the store activates and is bound to the installation permanently;
+ *  - a license from the store must be active, for the same product and
+ *    unexpired. Then
+ *        granted_features = requested_features & license.features
+ *    (all license features when the client requested none) and the license
+ *    expiry caps the session lifetime. Licenses unknown to the store grant
+ *    nothing;
+ *  - with SG_SERVER_OPT_REQUIRE_LICENSE every session without a verified
+ *    license is denied;
+ *  - after on_authorize allowed the session it takes a seat of the license
+ *    (up to max_installations; no free seat = denial). A seat is an
+ *    activation, kept until SG_Server_ReleaseLicenseSeat or
+ *    SG_Server_RevokeClient, not only while connected.
+ *
  * Threading: callbacks run without any SockGate lock held, usually on I/O
  * worker threads, but also on the thread whose call closed a session
  * (SG_Server_CloseSession, SG_Server_RevokeClient, SG_Server_Stop, a failing
@@ -30,10 +51,18 @@ typedef struct SG_Server SG_Server;
 #define SG_SERVER_OPT_ALLOW_TLS12            (1u << 0)
 #define SG_SERVER_OPT_REQUIRE_APP_ENCRYPTION (1u << 1) /* reject DATA without application-layer AEAD */
 #define SG_SERVER_OPT_ALLOW_ENROLLMENT       (1u << 2) /* accept ENROLL handshakes */
-#define SG_SERVER_OPT_REQUIRE_LICENSE        (1u << 3) /* deny sessions without a valid license (reserved) */
+#define SG_SERVER_OPT_REQUIRE_LICENSE        (1u << 3) /* deny sessions without a license from the license store */
+/* Let installations without a license binding activate a license by claiming
+ * its id. License ids then act as bearer secrets: make them unguessable. */
+#define SG_SERVER_OPT_LICENSE_ACTIVATION     (1u << 4)
 
 #define SG_AUTH_MODE_AUTHENTICATE 1u
 #define SG_AUTH_MODE_ENROLL       2u
+
+/* SG_AuthRequest.license_status: result of the built-in license check. */
+#define SG_LICENSE_STATUS_NONE    0u /* no license registered or claimed */
+#define SG_LICENSE_STATUS_VALID   1u /* verified against the license store */
+#define SG_LICENSE_STATUS_UNKNOWN 2u /* registered but not in the license store, or an unverified claim */
 
 /* Everything below that came from the client is a claim, not a fact. */
 #define SG_AUTH_REQUEST_VERSION 1u
@@ -59,9 +88,13 @@ typedef struct SG_AuthRequest {
     const char* peer_address;
     const char* registered_product_id;  /* from the server's registry ("" if none) */
     const char* registered_license_id;
+    uint32_t license_status;            /* SG_LICENSE_STATUS_* (server-verified) */
+    uint32_t reserved1;
+    uint64_t license_features;          /* entitlement of a VALID license, else 0 */
 } SG_AuthRequest;
 
-/* Pre-filled with the built-in decision; the callback may change it. */
+/* Pre-filled with the built-in decision; the callback may change it (the
+ * application is trusted: it may also grant features beyond the license). */
 #define SG_AUTH_DECISION_VERSION 1u
 typedef struct SG_AuthDecision {
     uint32_t size;
@@ -103,8 +136,10 @@ typedef struct SG_ServerSessionInfo {
     uint32_t enrolled;
     char peer_address[64];
     char product_id[65];
-    char license_id[129];
+    char license_id[129];              /* registered or verified license, never a raw claim */
     char reserved[6];
+    uint32_t license_status;           /* SG_LICENSE_STATUS_* of license_id */
+    uint32_t reserved2;
 } SG_ServerSessionInfo;
 
 #define SG_SERVER_CALLBACKS_VERSION 1u
@@ -116,7 +151,9 @@ typedef struct SG_ServerCallbacks {
     SG_Status (SG_CALL *on_authorize)(void* user, const SG_AuthRequest* request, SG_AuthDecision* decision);
     /* ENROLL validation for externally issued tokens. Must return SG_OK and
      * the token's 32-byte key K_tok, or an error to reject. NULL = built-in
-     * tokens from SG_Server_IssueEnrollmentToken. */
+     * tokens from SG_Server_IssueEnrollmentToken. SG_OK approves the token and
+     * registers the installation with the claimed product; a claimed license
+     * is NOT bound (it is treated like any license claim, see above). */
     SG_Status (SG_CALL *on_enroll)(void* user, const SG_EnrollRequest* request, uint8_t token_key_out[32]);
     void (SG_CALL *on_session_opened)(void* user, const SG_ServerSessionInfo* info);
     void (SG_CALL *on_message)(void* user, SG_SessionHandle session, const void* data, size_t size,
@@ -169,6 +206,8 @@ typedef struct SG_ServerOptions {
     void* log_user;
     uint32_t log_level;                /* default SG_LOG_WARN */
     uint32_t reserved2;
+
+    const char* license_path;          /* NULL = in-memory license store; must differ from registry_path */
 } SG_ServerOptions;
 
 #define SG_CLIENT_RECORD_VERSION 1u
@@ -191,6 +230,32 @@ typedef struct SG_EnrollmentTokenRequest {
     uint32_t reserved;
 } SG_EnrollmentTokenRequest;
 
+#define SG_LICENSE_RECORD_VERSION 1u
+typedef struct SG_LicenseRecord {
+    uint32_t size;
+    uint32_t version;
+    const char* license_id;            /* required, 1..128 bytes */
+    const char* product_id;            /* required, 1..64 bytes */
+    uint64_t features;                 /* feature bits the license entitles */
+    uint64_t expires_at_ms;            /* Unix ms, 0 = perpetual */
+    uint32_t max_installations;        /* 0 = unlimited */
+    uint32_t reserved;
+} SG_LicenseRecord;
+
+#define SG_LICENSE_INFO_VERSION 1u
+typedef struct SG_LicenseInfo {
+    uint32_t size;
+    uint32_t version;
+    char product_id[65];
+    uint8_t reserved0[7];
+    uint64_t features;
+    uint64_t expires_at_ms;
+    uint32_t max_installations;
+    uint32_t installations;            /* seats in use */
+    uint32_t revoked;                  /* 1 once revoked */
+    uint32_t reserved1;
+} SG_LicenseInfo;
+
 #define SG_SERVER_STATS_VERSION 1u
 typedef struct SG_ServerStats {
     uint32_t size;
@@ -209,6 +274,8 @@ SG_SERVER_API void SG_CALL SG_ServerOptions_Init(SG_ServerOptions* options);
 SG_SERVER_API void SG_CALL SG_ServerCallbacks_Init(SG_ServerCallbacks* callbacks);
 SG_SERVER_API void SG_CALL SG_ClientRecord_Init(SG_ClientRecord* record);
 SG_SERVER_API void SG_CALL SG_EnrollmentTokenRequest_Init(SG_EnrollmentTokenRequest* request);
+SG_SERVER_API void SG_CALL SG_LicenseRecord_Init(SG_LicenseRecord* record);
+SG_SERVER_API void SG_CALL SG_LicenseInfo_Init(SG_LicenseInfo* info);
 SG_SERVER_API void SG_CALL SG_ServerSessionInfo_Init(SG_ServerSessionInfo* info);
 SG_SERVER_API void SG_CALL SG_ServerStats_Init(SG_ServerStats* stats);
 
@@ -226,12 +293,29 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_CloseSession(SG_Server* server, SG_Ses
 SG_SERVER_API SG_Status SG_CALL SG_Server_GetSessionInfo(SG_Server* server, SG_SessionHandle session,
                                                          SG_ServerSessionInfo* info);
 
-/* Registry. Revocation closes the installation's live sessions immediately. */
+/* Registry. Revocation closes the installation's live sessions immediately.
+ * A license binding in a record or token must name an active license for
+ * the same product when the license store knows it (SG_INVALID_STATE /
+ * SG_INVALID_ARGUMENT), and must exist with SG_SERVER_OPT_REQUIRE_LICENSE
+ * (SG_NOT_FOUND). */
 SG_SERVER_API SG_Status SG_CALL SG_Server_RegisterClient(SG_Server* server, const SG_ClientRecord* record);
 SG_SERVER_API SG_Status SG_CALL SG_Server_RevokeClient(SG_Server* server, const SG_InstallationId* installation_id);
 SG_SERVER_API SG_Status SG_CALL SG_Server_IssueEnrollmentToken(SG_Server* server,
                                                                const SG_EnrollmentTokenRequest* request, char* token,
                                                                size_t capacity, size_t* written);
+
+/* Licenses. AddLicense inserts a license or updates its terms; changed terms
+ * apply to new sessions and at each session's next refresh. Revocation is
+ * permanent and closes the sessions authorised under the license
+ * immediately. ReleaseLicenseSeat frees an installation's seat (closing its
+ * sessions under that license); the installation takes a seat again on its
+ * next successful authorization if one is free. */
+SG_SERVER_API SG_Status SG_CALL SG_Server_AddLicense(SG_Server* server, const SG_LicenseRecord* license);
+SG_SERVER_API SG_Status SG_CALL SG_Server_RevokeLicense(SG_Server* server, const char* license_id);
+SG_SERVER_API SG_Status SG_CALL SG_Server_ReleaseLicenseSeat(SG_Server* server, const char* license_id,
+                                                             const SG_InstallationId* installation_id);
+SG_SERVER_API SG_Status SG_CALL SG_Server_GetLicense(SG_Server* server, const char* license_id,
+                                                     SG_LicenseInfo* info);
 
 SG_SERVER_API SG_Status SG_CALL SG_Server_GetStats(SG_Server* server, SG_ServerStats* stats);
 SG_SERVER_API uint32_t SG_CALL SG_Server_GetApiVersion(void);

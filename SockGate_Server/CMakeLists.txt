@@ -4,10 +4,12 @@
 #   sockgate_server       public library exposing only the C ABI
 
 set(SG_SERVER_CORE_SOURCES
+    src/auth/builtin_authorizer.cpp
     src/auth/server_handshake.cpp
     src/core/server_engine.cpp
     src/session/connection.cpp
     src/storage/client_registry.cpp
+    src/storage/license_store.cpp
 )
 
 if(SOCKGATE_PLATFORM STREQUAL "windows")

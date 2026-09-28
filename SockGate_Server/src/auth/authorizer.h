@@ -13,6 +13,13 @@
 
 namespace sg::server {
 
+// Result of the built-in license check (server-verified, not a claim).
+enum class LicenseCheck : uint8_t {
+    kNone = 0,     // no license bound or claimed
+    kValid = 1,    // verified against the license store, seat bound
+    kUnknown = 2,  // claimed or bound, but not in the license store (unverified)
+};
+
 struct AuthorizationRequest {
     proto::InstallationId installation_id{};
     const ClientRecord* record = nullptr;  // verified registry entry
@@ -31,6 +38,9 @@ struct AuthorizationRequest {
     bool has_integrity = false;
     proto::IntegrityReport integrity;
     std::string peer_address;
+    // Filled by the built-in authorizer before the application hook runs:
+    LicenseCheck license_status = LicenseCheck::kNone;
+    uint64_t license_features = 0;  // entitlement of a verified license
 };
 
 struct AuthorizationDecision {
@@ -40,6 +50,8 @@ struct AuthorizationDecision {
     uint32_t session_lifetime_ms = 0;  // 0 = server default
     uint64_t license_expires_at_ms = 0;  // 0 = not license bound
     std::string license_id;  // license the session was authorised under (for revocation)
+    bool license_verified = false;  // license_id was checked against the license store
+    bool seat_newly_taken = false;  // this authorization took the license seat
     std::string deny_reason;  // for server logs only, never sent to the client
 };
 

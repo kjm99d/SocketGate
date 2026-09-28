@@ -67,7 +67,7 @@ typedef struct SG_ClientConfig {
     const char* product_id;      /* optional, <= 64 bytes UTF-8 */
     const char* product_version; /* optional, <= 32 bytes */
     const char* license_id;      /* optional, <= 128 bytes */
-    uint64_t requested_features;
+    uint64_t requested_features; /* 0 = everything the license entitles */
     uint16_t client_version_major;
     uint16_t client_version_minor;
     uint16_t client_version_patch;

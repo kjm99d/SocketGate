@@ -36,8 +36,8 @@
 |---|---|
 | installation_id | registry 조회 키. 서명 검증 전까지 아무 권한 없음 |
 | product_id / product_version | 서버 정책과 대조 |
-| license_id | 서버 license store 에서 조회. 존재·만료·제품·installation 바인딩 검증 |
-| requested_features | 서버가 교집합 계산 후 `granted_features` 로 응답 |
+| license_id | registry 바인딩이 우선(불일치 시 거부). 바인딩 없는 주장은 권한 없음 (명시적 활성화 모드에서만 첫 주장이 바인딩됨). 서버 license store 에서 활성·만료·제품·좌석 검증 |
+| requested_features | `granted = requested ∩ license.features` 를 서버가 계산해 `granted_features` 로 응답 |
 | integrity report | 신뢰 하향에만 사용 |
 | client_version | 최소 버전 정책에만 사용 |
 

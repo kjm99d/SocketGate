@@ -1,5 +1,6 @@
 #include "core/server_engine.h"
 
+#include "auth/builtin_authorizer.h"
 #include "session/connection.h"
 #include "storage/atomic_file.h"
 
@@ -17,38 +18,6 @@ constexpr uint32_t kDefaultTokenTtlMs = 24u * 3600 * 1000;
 constexpr uint32_t kMaxTokenTtlMs = 30u * 24 * 3600 * 1000;
 
 thread_local bool t_in_callback = false;
-
-// Built-in policy (verified, active installation -> NORMAL session, no
-// features) refined by the application's on_authorize hook, if any.
-class EngineAuthorizer final : public IAuthorizer {
-public:
-    explicit EngineAuthorizer(const EngineCallbacks* callbacks) : callbacks_(callbacks) {}
-
-    Status Authorize(const AuthorizationRequest& request, AuthorizationDecision* decision) override
-    {
-        decision->allow = request.record != nullptr && request.record->status == ClientStatus::kActive;
-        decision->policy = proto::SessionPolicy::kNormal;
-        decision->granted_features = 0;
-        if (!decision->allow) {
-            decision->deny_reason = "installation not active";
-            return OkStatus();
-        }
-        if (callbacks_->authorize) {
-            CallbackScope scope;
-            const Status st = callbacks_->authorize(request.session_handle, request, decision);
-            if (!st.ok()) {
-                decision->allow = false;
-                decision->deny_reason = "application callback failed";
-            } else if (!decision->allow && decision->deny_reason.empty()) {
-                decision->deny_reason = "denied by application";
-            }
-        }
-        return OkStatus();
-    }
-
-private:
-    const EngineCallbacks* callbacks_;
-};
 
 }  // namespace
 
@@ -82,7 +51,25 @@ Status ServerEngine::Create(EngineConfig config, EngineCallbacks callbacks, std:
     } else {
         SG_TRY(CreateFileClientRegistry(cfg.registry_path, &engine->registry_));
     }
-    engine->authorizer_ = std::make_unique<EngineAuthorizer>(&engine->callbacks_);
+    if (cfg.license_path.empty()) {
+        engine->licenses_ = CreateMemoryLicenseStore();
+    } else {
+        SG_TRY(CreateFileLicenseStore(cfg.license_path, &engine->licenses_));
+    }
+    BuiltinAuthorizerConfig authz;
+    authz.licenses = engine->licenses_.get();
+    authz.registry = engine->registry_.get();
+    authz.require_license = cfg.require_license;
+    authz.allow_activation = cfg.allow_license_activation;
+    authz.unix_ms = cfg.handshake.unix_ms;
+    if (engine->callbacks_.authorize) {
+        const ServerEngine* self = engine.get();
+        authz.hook = [self](const AuthorizationRequest& request, AuthorizationDecision* decision) {
+            CallbackScope scope;
+            return self->callbacks_.authorize(request.session_handle, request, decision);
+        };
+    }
+    engine->authorizer_ = std::make_unique<BuiltinAuthorizer>(std::move(authz));
 
     HandshakeConfig hs = cfg.handshake;
     if (hs.token_key.empty()) {
@@ -283,8 +270,56 @@ Status ServerEngine::GetSession(SG_SessionHandle session, SessionSnapshot* out)
     return conn->Snapshot(out) ? OkStatus() : Status(SG_NOT_FOUND);
 }
 
+size_t ServerEngine::CloseMatching(const std::function<bool(Connection&)>& match)
+{
+    size_t closed = 0;
+    for (const auto& conn : SnapshotConnections()) {
+        if (match(*conn)) {
+            conn->Close(proto::CloseReason::kAuthFailed, SG_AUTH_FAILED);
+            ++closed;
+        }
+    }
+    return closed;
+}
+
+bool ServerEngine::IsStillAuthorized(const proto::InstallationId& installation_id,
+                                     const AuthorizationDecision& decision)
+{
+    ClientRecord record;
+    if (!registry_->Find(installation_id, &record).ok() || record.status != ClientStatus::kActive) return false;
+    if (decision.license_id.empty()) return true;
+    LicenseRecord license;
+    const Status found = licenses_->Find(decision.license_id, &license);
+    if (found == SG_NOT_FOUND) return !decision.license_verified;
+    if (!found.ok() || license.status != LicenseStatus::kActive) return false;
+    return !decision.license_verified || licenses_->HasSeat(decision.license_id, installation_id).ok();
+}
+
+void ServerEngine::ReleaseNewSeat(const proto::InstallationId& installation_id, const AuthorizationDecision& decision)
+{
+    if (decision.seat_newly_taken && !decision.license_id.empty()) {
+        licenses_->ReleaseSeat(decision.license_id, installation_id).IgnoreError();
+    }
+}
+
+// Admin-side consistency for a product/license binding: a license the store
+// knows must be active and for the same product; unknown licenses are only
+// accepted when licensing is not enforced.
+Status ServerEngine::CheckLicenseBinding(const std::string& product_id, const std::string& license_id)
+{
+    if (license_id.empty()) return OkStatus();
+    LicenseRecord license;
+    const Status found = licenses_->Find(license_id, &license);
+    if (found == SG_NOT_FOUND) return config_.require_license ? found : OkStatus();
+    SG_TRY(found);
+    if (license.status != LicenseStatus::kActive) return SG_INVALID_STATE;
+    if (!product_id.empty() && license.product_id != product_id) return SG_INVALID_ARGUMENT;
+    return OkStatus();
+}
+
 Status ServerEngine::RegisterClient(const ClientRecord& record)
 {
+    SG_TRY(CheckLicenseBinding(record.product_id, record.license_id));
     ClientRecord copy = record;
     if (copy.created_at_ms == 0) copy.created_at_ms = UnixTimeMs();
     return registry_->Register(copy);
@@ -293,17 +328,56 @@ Status ServerEngine::RegisterClient(const ClientRecord& record)
 Status ServerEngine::RevokeClient(const proto::InstallationId& installation_id)
 {
     SG_TRY(registry_->Revoke(installation_id));
+    revocations_.fetch_add(1);
     // Revocation takes effect immediately for live sessions.
-    size_t closed = 0;
-    for (const auto& conn : SnapshotConnections()) {
-        if (conn->IsInstallation(installation_id)) {
-            conn->Close(proto::CloseReason::kAuthFailed, SG_AUTH_FAILED);
-            ++closed;
-        }
+    const size_t closed = CloseMatching([&](Connection& conn) { return conn.IsInstallation(installation_id); });
+    // A revoked installation can never use its license seat again: free it.
+    ClientRecord record;
+    if (registry_->Find(installation_id, &record).ok() && !record.license_id.empty()) {
+        licenses_->ReleaseSeat(record.license_id, installation_id).IgnoreError();
     }
     SG_LOGI(config_.logger, "event=installation_revoked installation=%s sessions_closed=%zu",
             ShortId(installation_id).c_str(), closed);
     return OkStatus();
+}
+
+Status ServerEngine::AddLicense(const LicenseRecord& record)
+{
+    SG_TRY(licenses_->Upsert(record));
+    // Changed terms apply to new sessions and at each session's next refresh.
+    SG_LOGI(config_.logger, "event=license_updated license=%s features=%llu expires_at_ms=%llu max_installations=%u",
+            LicenseLogRef(record.license_id).c_str(), static_cast<unsigned long long>(record.features),
+            static_cast<unsigned long long>(record.expires_at_ms), record.max_installations);
+    return OkStatus();
+}
+
+Status ServerEngine::RevokeLicense(const std::string& license_id)
+{
+    // SG_STORAGE_ERROR: revoked in memory but not persisted. The revocation
+    // still takes effect for this process; the caller learns it is not durable.
+    const Status st = licenses_->Revoke(license_id);
+    if (!st.ok() && st != SG_STORAGE_ERROR) return st;
+    revocations_.fetch_add(1);
+    const size_t closed = CloseMatching([&](Connection& conn) { return conn.UsesLicense(license_id, nullptr); });
+    SG_LOGI(config_.logger, "event=license_revoked license=%s sessions_closed=%zu durable=%d",
+            LicenseLogRef(license_id).c_str(), closed, st.ok() ? 1 : 0);
+    return st;
+}
+
+Status ServerEngine::ReleaseLicenseSeat(const std::string& license_id, const proto::InstallationId& installation_id)
+{
+    SG_TRY(licenses_->ReleaseSeat(license_id, installation_id));
+    revocations_.fetch_add(1);
+    const size_t closed =
+        CloseMatching([&](Connection& conn) { return conn.UsesLicense(license_id, &installation_id); });
+    SG_LOGI(config_.logger, "event=license_seat_released license=%s installation=%s sessions_closed=%zu",
+            LicenseLogRef(license_id).c_str(), ShortId(installation_id).c_str(), closed);
+    return OkStatus();
+}
+
+Status ServerEngine::GetLicense(const std::string& license_id, LicenseRecord* out)
+{
+    return licenses_->Find(license_id, out);
 }
 
 Status ServerEngine::IssueEnrollmentToken(const std::string& product_id, const std::string& license_id,
@@ -312,6 +386,7 @@ Status ServerEngine::IssueEnrollmentToken(const std::string& product_id, const s
     if (token == nullptr || product_id.empty()) return SG_INVALID_ARGUMENT;
     if (ttl_ms == 0) ttl_ms = kDefaultTokenTtlMs;
     if (ttl_ms > kMaxTokenTtlMs) return SG_INVALID_ARGUMENT;
+    SG_TRY(CheckLicenseBinding(product_id, license_id));
     proto::EnrollmentClaims claims;
     SG_TRY(crypto::RandomArray(&claims.token_id));
     claims.product_id = product_id;

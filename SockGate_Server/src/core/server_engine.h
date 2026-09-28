@@ -8,6 +8,7 @@
 #include "auth/authorizer.h"
 #include "auth/server_handshake.h"
 #include "storage/client_registry.h"
+#include "storage/license_store.h"
 #include "transport/io_service.h"
 
 #include "sockgate_common/core/log.h"
@@ -37,6 +38,7 @@ struct SessionSnapshot {
     uint32_t epoch = 0;
     uint64_t granted_features = 0;
     uint64_t license_expires_at_ms = 0;
+    LicenseCheck license_status = LicenseCheck::kNone;
     uint64_t expires_in_ms = 0;
     bool enrolled = false;
     std::string peer_address;
@@ -59,6 +61,9 @@ struct EngineConfig {
     tls::TlsServerConfig tls;
     HandshakeConfig handshake;
     std::string registry_path;
+    std::string license_path;
+    bool require_license = false;
+    bool allow_license_activation = false;
     uint32_t worker_threads = 0;
     uint32_t max_connections = 10'000;
     uint32_t handshake_timeout_ms = 15'000;
@@ -100,6 +105,11 @@ public:
     Status IssueEnrollmentToken(const std::string& product_id, const std::string& license_id, uint32_t ttl_ms,
                                 std::string* token);
 
+    Status AddLicense(const LicenseRecord& record);
+    Status RevokeLicense(const std::string& license_id);
+    Status ReleaseLicenseSeat(const std::string& license_id, const proto::InstallationId& installation_id);
+    Status GetLicense(const std::string& license_id, LicenseRecord* out);
+
     uint64_t ActiveConnections();
     uint64_t ActiveSessions();
     const EngineStats& stats() const noexcept { return stats_; }
@@ -112,6 +122,13 @@ public:
     IAuthorizer& authorizer() noexcept { return *authorizer_; }
     EngineStats& mutable_stats() noexcept { return stats_; }
     const EngineCallbacks& callbacks() const noexcept { return callbacks_; }
+    // Incremented after every revocation-type change (installation, license,
+    // seat). A connection authorised concurrently with one re-checks itself.
+    uint64_t revocation_generation() const noexcept { return revocations_.load(); }
+    bool IsStillAuthorized(const proto::InstallationId& installation_id, const AuthorizationDecision& decision);
+    // Gives back the seat an authorization took if the session is rejected
+    // afterwards because of a concurrent revocation.
+    void ReleaseNewSeat(const proto::InstallationId& installation_id, const AuthorizationDecision& decision);
     // Called outside any connection lock when a connection finished closing.
     void OnConnectionClosed(const std::shared_ptr<Connection>& connection);
 
@@ -121,15 +138,19 @@ private:
     void OnAccept(std::shared_ptr<AsyncStream> stream);
     void SweeperLoop();
     std::vector<std::shared_ptr<Connection>> SnapshotConnections();
+    Status CheckLicenseBinding(const std::string& product_id, const std::string& license_id);
+    size_t CloseMatching(const std::function<bool(Connection&)>& match);
 
     EngineConfig config_;
     EngineCallbacks callbacks_;
     std::shared_ptr<tls::ITlsContext> tls_context_;
     std::unique_ptr<IClientRegistry> registry_;
+    std::unique_ptr<ILicenseStore> licenses_;
     std::unique_ptr<IAuthorizer> authorizer_;
     std::shared_ptr<const ServerAuthContext> auth_;
     std::unique_ptr<IIoService> io_;
     EngineStats stats_;
+    std::atomic<uint64_t> revocations_{0};
 
     std::mutex lifecycle_mutex_;
     bool running_ = false;

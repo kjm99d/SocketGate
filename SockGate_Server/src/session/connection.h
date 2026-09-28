@@ -38,6 +38,8 @@ public:
     const std::shared_ptr<AsyncStream>& stream() const noexcept { return stream_; }
     bool Snapshot(SessionSnapshot* out);
     bool IsInstallation(const proto::InstallationId& id);
+    // Open session authorised under `license_id` (and, if given, for `installation`).
+    bool UsesLicense(const std::string& license_id, const proto::InstallationId* installation);
     bool IsAuthenticated();
 
 private:

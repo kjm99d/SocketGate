@@ -95,6 +95,10 @@ public:
     // Other errors: protocol violation, close without reply.
     Status OnClientProof(const proto::DecodedFrame& frame, Bytes* reply, HandshakeOutcome* outcome);
 
+    // Replaces a successful outcome with AUTH_RESULT(REJECTED) in *reply;
+    // returns SG_AUTH_FAILED.
+    Status Reject(const std::string& reason, Bytes* reply);
+
     void set_session_handle(uint64_t handle) noexcept { session_handle_ = handle; }
     proto::Phase phase() const noexcept { return phase_; }
     const std::string& failure_reason() const noexcept { return failure_reason_; }
@@ -102,7 +106,6 @@ public:
     const proto::InstallationId& claimed_installation_id() const noexcept { return hello_.installation_id; }
 
 private:
-    Status Reject(const std::string& reason, Bytes* reply);
     Status VerifyEnrollment(const proto::ClientProof& proof, const crypto::Sha256Digest& th1,
                             const Bytes& signed_data, ClientRecord* record);
     Status BuildAuthResult(const AuthorizationDecision& decision, uint32_t lifetime_ms,

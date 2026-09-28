@@ -47,6 +47,13 @@ public:
 
     virtual bool IsTokenUsed(const proto::TokenId& token_id) = 0;
 
+    // Pins a license (and the product, if still unbound) to an installation
+    // that has no license binding yet: first binding wins. OK if already bound
+    // to exactly this license; SG_ALREADY_EXISTS if bound to another one;
+    // SG_INVALID_ARGUMENT on a product conflict; SG_INVALID_STATE if revoked.
+    virtual Status BindLicense(const proto::InstallationId& id, const std::string& product_id,
+                               const std::string& license_id) = 0;
+
     virtual size_t Count() = 0;
     virtual void ForEach(const std::function<void(const ClientRecord&)>& fn) = 0;
 };
