@@ -12,7 +12,9 @@
 
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <string>
+#include <thread>
 
 using namespace sgtest;
 
@@ -229,6 +231,47 @@ SG_TEST(Proxy, ConnectTimeoutCoversProxyAndTls)
     SG_EXPECT(slow_proxy.tunnels() == 1);  // the proxy part succeeded
     SG_EXPECT(ms >= 1900);                 // ...and the budget was used up
     SG_EXPECT(ms < 2900);                  // a fresh TLS budget would take ~3200 ms
+}
+
+SG_TEST(Proxy, DisconnectAbortsConnectWithClosed)
+{
+    // Disconnect() from another thread cancels a Connect() in any phase; the
+    // caller always sees SG_CLOSED, never a proxy or TLS error.
+    TestProxy::Options silent_options;
+    silent_options.misbehaviour = TestProxy::Misbehaviour::kSilent;
+    TestProxy silent_server(silent_options);  // accepts, reads, never answers
+    const std::string ca = RealCa().cert_pem;
+    const SG_ServerConfig t = Target(silent_server.port(), ca);
+    for (int phase = 0; phase < 2; ++phase) {
+        // phase 0: stuck in the proxy negotiation; phase 1: stuck in the TLS handshake.
+        TestProxy::Options proxy_options;
+        proxy_options.reply_delay_ms = phase == 0 ? 3000 : 0;
+        TestProxy proxy(proxy_options);
+        const SG_ProxyConfig pc = Explicit(SG_PROXY_TYPE_HTTP_CONNECT, proxy.port());
+        ClientPtr client = NewClient(&pc);  // connect_timeout 3000 ms
+        auto result = std::async(std::launch::async, [&]() { return SG_Client_Connect(client.get(), &t); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        if (phase == 1) {
+            // Make sure the proxy part is over, i.e. the client is in the TLS handshake.
+            for (int i = 0; i < 100 && proxy.tunnels() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            SG_ASSERT(proxy.tunnels() == 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        const auto start = std::chrono::steady_clock::now();
+        SG_Client_Disconnect(client.get());
+        SG_ASSERT(result.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        const SG_Status st = result.get();
+        if (st != SG_CLOSED) {
+            sgtest::ReportFailure(__FILE__, __LINE__,
+                                  std::string("phase ") + std::to_string(phase) + ": " + SG_StatusString(st));
+        }
+        SG_EXPECT(ms < 1500);  // cancelled, not timed out
+        uint32_t state = 0;
+        SG_Client_GetState(client.get(), &state);
+        SG_EXPECT_EQ(state, SG_CLIENT_STATE_CLOSED);
+    }
 }
 
 SG_TEST(Proxy, HostileOrBrokenProxies)

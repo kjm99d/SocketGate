@@ -102,7 +102,8 @@ Status ClientSession::Fail(uint64_t generation, Status status, uint32_t new_stat
     std::shared_ptr<TlsChannel> tls;
     {
         std::lock_guard<std::mutex> lock(link_mutex_);
-        if (link_.generation != generation) return status;  // stale: a newer connection exists
+        // Stale (a newer connection exists) or already torn down: leave the state alone.
+        if (link_.generation != generation || !link_.tls) return status;
         tls = std::move(link_.tls);
         link_.channel.reset();
         state_.store(new_state);
@@ -173,7 +174,8 @@ Status ClientSession::MaybeAutoRefresh()
     return due ? RefreshImpl(true) : OkStatus();
 }
 
-Status ClientSession::OpenTransport(const ServerTarget& target, std::shared_ptr<net::ITransport>* out)
+Status ClientSession::OpenTransport(const ServerTarget& target, uint64_t attempt,
+                                    std::shared_ptr<net::ITransport>* out)
 {
     TransportRequest request;
     request.host = target.host;
@@ -182,8 +184,12 @@ Status ClientSession::OpenTransport(const ServerTarget& target, std::shared_ptr<
     request.io_timeout_ms = settings_.io_timeout_ms;
     request.proxy = &settings_.proxy;
     request.logger = &settings_.logger;
-    return CreateConnectedTransport(request, out, [this](const std::shared_ptr<net::ITransport>& t) {
+    return CreateConnectedTransport(request, out, [this, attempt](const std::shared_ptr<net::ITransport>& t) {
         std::lock_guard<std::mutex> lock(link_mutex_);
+        if (link_.generation != attempt) {
+            t->Shutdown();  // Disconnect() already ran (e.g. during a proxy lookup): stop at once
+            return;
+        }
         connecting_transport_ = t;
     });
 }
@@ -220,14 +226,28 @@ Status ClientSession::Connect(const ServerTarget& target)
         }
     }
 
-    state_.store(SG_CLIENT_STATE_CONNECTING);
-    // One budget for TCP, the proxy and the TLS handshake together.
+    // A Disconnect() from another thread while this runs changes
+    // link_.generation: from then on this attempt ends with SG_CLOSED.
+    uint64_t attempt;
+    {
+        std::lock_guard<std::mutex> lock(link_mutex_);
+        attempt = link_.generation;
+        state_.store(SG_CLIENT_STATE_CONNECTING);
+    }
+    // One budget for resolution, TCP, the proxy and the TLS handshake together.
     const Deadline connect_deadline(settings_.connect_timeout_ms);
     std::shared_ptr<net::ITransport> transport;
-    const Status connected = OpenTransport(target, &transport);
+    const Status connected = OpenTransport(target, attempt, &transport);
+    bool aborted;
     {
         std::lock_guard<std::mutex> lock(link_mutex_);
         connecting_transport_.reset();
+        aborted = link_.generation != attempt;
+    }
+    if (aborted) {
+        if (transport) transport->Close();
+        SG_LOGI(settings_.logger, "event=connect_aborted host=%s", target.host.c_str());
+        return SG_CLOSED;
     }
     if (!connected.ok()) {
         SG_LOGW(settings_.logger, "event=connect_failed host=%s port=%u err=%s", target.host.c_str(),
@@ -253,20 +273,38 @@ Status ClientSession::Connect(const ServerTarget& target)
         return st;
     }
     auto channel = std::make_shared<TlsChannel>(std::move(transport), std::move(engine));
-    uint64_t generation;
+    uint64_t generation = 0;
     {
         // Published before the handshake so Disconnect() can abort it.
         std::lock_guard<std::mutex> lock(link_mutex_);
-        generation = next_generation_++;
-        link_.tls = channel;
-        link_.channel.reset();
-        link_.generation = generation;
-        state_.store(SG_CLIENT_STATE_TLS_HANDSHAKE);
+        aborted = link_.generation != attempt;
+        if (!aborted) {
+            generation = next_generation_++;
+            link_.tls = channel;
+            link_.channel.reset();
+            link_.generation = generation;
+            state_.store(SG_CLIENT_STATE_TLS_HANDSHAKE);
+        }
+    }
+    if (aborted) {
+        channel->Abort();
+        SG_LOGI(settings_.logger, "event=connect_aborted host=%s", target.host.c_str());
+        return SG_CLOSED;
     }
     // What the transport left of the budget (Handshake(0) would mean "no limit").
     st = channel->Handshake(connect_deadline.infinite() ? 0u
                                                         : std::max<uint32_t>(1, connect_deadline.RemainingMs(UINT32_MAX)));
     if (!st.ok()) {
+        {
+            std::lock_guard<std::mutex> lock(link_mutex_);
+            aborted = link_.generation != generation;
+        }
+        // Disconnect() tore the handshake down: not a TLS failure. Certificate
+        // and pinning failures are still reported as such.
+        if (aborted && st != SG_PINNING_ERROR && st != SG_CERTIFICATE_ERROR) {
+            SG_LOGI(settings_.logger, "event=connect_aborted host=%s", target.host.c_str());
+            return SG_CLOSED;
+        }
         SG_LOGW(settings_.logger, "event=tls_failed host=%s err=%s detail=\"%s\"", target.host.c_str(), st.name(),
                 channel->ErrorDetail().c_str());
         if (st == SG_PINNING_ERROR) {
@@ -295,7 +333,11 @@ Status ClientSession::Connect(const ServerTarget& target)
     SG_LOGI(settings_.logger, "event=tls_established peer=%s protocol=%s cipher=%s", channel->PeerAddress().c_str(),
             info.protocol.c_str(), info.cipher.c_str());
     // A concurrent Disconnect() wins: never resurrect a torn-down connection.
-    return SetStateIfCurrent(generation, SG_CLIENT_STATE_TLS_ESTABLISHED) ? OkStatus() : Status(SG_CLOSED);
+    if (!SetStateIfCurrent(generation, SG_CLIENT_STATE_TLS_ESTABLISHED)) {
+        SG_LOGI(settings_.logger, "event=connect_aborted host=%s", target.host.c_str());
+        return SG_CLOSED;
+    }
+    return OkStatus();
 }
 
 Status ClientSession::Authenticate(const std::string* enrollment_token)

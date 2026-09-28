@@ -114,7 +114,7 @@ private:
     // Stores `state` only if `generation` is still the current connection.
     bool SetStateIfCurrent(uint64_t generation, uint32_t state);
     Status ValidateTarget(const ServerTarget& target) const;
-    Status OpenTransport(const ServerTarget& target, std::shared_ptr<net::ITransport>* out);
+    Status OpenTransport(const ServerTarget& target, uint64_t attempt, std::shared_ptr<net::ITransport>* out);
     void ResetReceiveStateLocked(uint64_t generation);
     Status CheckUsable(const Link& link);
     Status MaybeAutoRefresh();
