@@ -7,7 +7,10 @@
 #include "transport/io_service.h"
 #include "transport/tcp_transport.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstring>
 #include <future>
 #include <mutex>
 #include <random>
