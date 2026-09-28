@@ -228,7 +228,11 @@ typedef struct SG_ServerOptions {
     uint32_t max_payload_size;         /* default 1 MiB, max 16 MiB */
     uint32_t min_reauth_interval_ms;   /* default 10000 */
     uint32_t flags;                    /* SG_SERVER_OPT_* */
-    uint32_t reserved1;
+    /* Connections still in the TLS / authentication phase; more are closed at
+     * accept, so a flood of unauthenticated connections cannot take the
+     * places of established sessions. 0 = max_connections / 2 (at least 1);
+     * must not exceed max_connections. */
+    uint32_t max_unauthenticated;
 
     const SG_ServerCallbacks* callbacks; /* copied at creation; nullable */
 

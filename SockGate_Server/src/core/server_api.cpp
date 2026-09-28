@@ -305,6 +305,9 @@ Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::En
         if (o->max_payload_size != 0) cfg->max_payload = o->max_payload_size;
         if (o->min_reauth_interval_ms != 0) cfg->min_reauth_interval_ms = o->min_reauth_interval_ms;
     }
+    if (SG_HAS_FIELD(o, SG_ServerOptions, max_unauthenticated)) {
+        cfg->max_unauthenticated = o->max_unauthenticated;  // 0 / range: ServerEngine::Create
+    }
     if (SG_HAS_FIELD(o, SG_ServerOptions, callbacks) && o->callbacks != nullptr) {
         const SG_ServerCallbacks* c = o->callbacks;
         if (c->version == 0 || !SG_HAS_FIELD(c, SG_ServerCallbacks, user)) return SG_INVALID_ARGUMENT;

@@ -607,6 +607,119 @@ SG_TEST(Session, SilentAndExcessConnectionsAreDropped)
     SG_EXPECT(ms < 4000);
 }
 
+namespace {
+
+// Waits until the server has accepted (and registered) `count` connections.
+bool WaitForAccepted(SG_Server* server, uint64_t count)
+{
+    for (int i = 0; i < 100; ++i) {
+        SG_ServerStats stats;
+        SG_ServerStats_Init(&stats);
+        if (SG_Server_GetStats(server, &stats) == SG_OK && stats.total_connections >= count) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+}  // namespace
+
+SG_TEST(Session, UnauthenticatedConnectionsAreCapped)
+{
+    TestServer server;
+    server.configure = [](SG_ServerOptions& o) { o.max_unauthenticated = 2; };
+    server.Start();
+    // An established session does not count against the limit.
+    ClientPtr established(NewClient({}, "cap-established"));
+    server.Register(established.get());
+    ConnectAndAuth(established.get(), server.port);
+    SG_ASSERT(server.WaitOpened(1));  // the server has counted it as authenticated
+
+    sg::client::TcpTransportOptions opts;
+    opts.io_timeout_ms = 5000;
+    auto silent1 = std::make_unique<sg::client::TcpTransport>(opts);
+    sg::client::TcpTransport silent2(opts);
+    SG_ASSERT_OK(silent1->Connect({"127.0.0.1", server.port}));
+    SG_ASSERT_OK(silent2.Connect({"127.0.0.1", server.port}));
+    SG_ASSERT(WaitForAccepted(server.server, 3));
+
+    // A third unauthenticated connection is closed at once...
+    sg::client::TcpTransport excess(opts);
+    SG_ASSERT_OK(excess.Connect({"127.0.0.1", server.port}));
+    uint8_t b = 0;
+    size_t n = 0;
+    const sg::Status ex = excess.ReceiveFor(&b, 1, &n, 3000);
+    SG_EXPECT(ex == SG_CLOSED || ex == SG_NETWORK_ERROR);
+    // ...while the established session keeps working.
+    SG_ASSERT_OK(SG_Client_Send(established.get(), "still", 5));
+    SG_EXPECT_EQ(ReceiveText(established.get()), std::string("still"));
+
+    // A place frees up when a pending connection goes away.
+    silent1->Close();
+    silent1.reset();
+    ClientPtr late(NewClient({}, "cap-late"));
+    server.Register(late.get());
+    const SG_ServerConfig t = Target(server.port);
+    SG_Status st = SG_INTERNAL_ERROR;
+    for (int i = 0; i < 50 && st != SG_OK; ++i) {
+        st = SG_Client_Connect(late.get(), &t);
+        if (st == SG_OK) st = SG_Client_Authenticate(late.get());
+        if (st != SG_OK) {
+            SG_Client_Disconnect(late.get());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    SG_EXPECT_OK(st);
+}
+
+SG_TEST(Session, FailedHandshakesKeepTheirPlaceWhileClosing)
+{
+    // A peer that sends garbage and never closes its side stays in the
+    // graceful-close phase; it must keep counting as unauthenticated.
+    TestServer server;
+    server.configure = [](SG_ServerOptions& o) { o.max_unauthenticated = 2; };
+    server.Start();
+    sg::client::TcpTransportOptions opts;
+    opts.io_timeout_ms = 5000;
+    sg::client::TcpTransport garbage(opts);
+    SG_ASSERT_OK(garbage.Connect({"127.0.0.1", server.port}));
+    const uint8_t junk[] = {'G', 'E', 'T', ' ', '/', '\r', '\n', '\r', '\n'};
+    SG_ASSERT_OK(garbage.Send(junk, sizeof(junk)));
+    // The server fails the handshake and shuts down its side (graceful close):
+    // read until end-of-stream, without closing ours.
+    sg::Status gs = SG_OK;
+    for (int i = 0; i < 64 && gs == SG_OK; ++i) {
+        uint8_t buf[256];
+        size_t got = 0;
+        gs = garbage.ReceiveFor(buf, sizeof(buf), &got, 3000);
+    }
+    SG_ASSERT(gs == SG_CLOSED || gs == SG_NETWORK_ERROR);
+    sg::client::TcpTransport silent(opts);
+    SG_ASSERT_OK(silent.Connect({"127.0.0.1", server.port}));
+    SG_ASSERT(WaitForAccepted(server.server, 2));
+
+    sg::client::TcpTransport excess(opts);
+    SG_ASSERT_OK(excess.Connect({"127.0.0.1", server.port}));
+    uint8_t b = 0;
+    size_t n = 0;
+    const sg::Status ex = excess.ReceiveFor(&b, 1, &n, 3000);
+    SG_EXPECT(ex == SG_CLOSED || ex == SG_NETWORK_ERROR);
+}
+
+SG_TEST(Session, UnauthenticatedLimitIsValidated)
+{
+    SG_ServerOptions opts;
+    SG_ServerOptions_Init(&opts);
+    opts.tls_cert_chain_pem = Leaf().cert_pem.c_str();
+    opts.tls_private_key_pem = Leaf().key_pem.c_str();
+    opts.max_connections = 4;
+    opts.max_unauthenticated = 5;
+    SG_Server* server = nullptr;
+    SG_EXPECT_STATUS(SG_Server_Create(&opts, &server), SG_INVALID_ARGUMENT);
+    opts.max_unauthenticated = 4;
+    SG_ASSERT_OK(SG_Server_Create(&opts, &server));
+    SG_Server_Destroy(server);
+}
+
 SG_TEST(Session, AuthorizeCallbackDecides)
 {
     TestServer server;

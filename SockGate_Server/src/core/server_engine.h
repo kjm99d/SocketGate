@@ -68,6 +68,7 @@ struct EngineConfig {
     IntegrityPolicy integrity;
     uint32_t worker_threads = 0;
     uint32_t max_connections = 10'000;
+    uint32_t max_unauthenticated = 0;  // 0 = max_connections / 2, at least 1
     uint32_t handshake_timeout_ms = 15'000;
     uint32_t idle_timeout_ms = 300'000;
     uint32_t max_payload = 1u << 20;
@@ -135,6 +136,11 @@ public:
     void OnConnectionClosed(const std::shared_ptr<Connection>& connection);
 
 private:
+    friend class Connection;  // ReleaseUnauthenticated
+
+    // A connection left the unauthenticated phase (see Connection::LeaveUnauthenticated).
+    void ReleaseUnauthenticated() noexcept { unauthenticated_.fetch_sub(1); }
+
     ServerEngine(EngineConfig config, EngineCallbacks callbacks);
     void StopImpl();
     void OnAccept(std::shared_ptr<AsyncStream> stream);
@@ -163,8 +169,20 @@ private:
     std::map<SG_SessionHandle, std::shared_ptr<Connection>> connections_;
     // Streams in their graceful-close phase. Held strongly (the Connection may
     // already be gone) until they closed or the timeout forces them shut; they
-    // still count against max_connections.
-    std::vector<std::pair<std::shared_ptr<AsyncStream>, uint64_t>> closing_;
+    // still count against max_connections, and a stream that never
+    // authenticated also keeps its place in unauthenticated_ (otherwise a peer
+    // that sends garbage and never closes would bypass max_unauthenticated).
+    struct ClosingStream {
+        std::shared_ptr<AsyncStream> stream;
+        uint64_t since = 0;
+        bool unauthenticated = false;
+    };
+    std::vector<ClosingStream> closing_;
+    // Connections accepted but not yet authenticated, including their
+    // graceful-close phase (see max_unauthenticated). Incremented only under
+    // connections_mutex_; decremented under it too, except on authentication
+    // (lock-free, so a concurrent check can only see too high a count).
+    std::atomic<uint32_t> unauthenticated_{0};
     std::atomic<SG_SessionHandle> next_handle_{1};
 
     std::mutex sweeper_mutex_;

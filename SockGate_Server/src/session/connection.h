@@ -41,6 +41,13 @@ public:
     // Open session authorised under `license_id` (and, if given, for `installation`).
     bool UsesLicense(const std::string& license_id, const proto::InstallationId* installation);
     bool IsAuthenticated();
+    // Accounting for ServerEngine's unauthenticated-connection limit: set at
+    // accept, left exactly once. LeaveUnauthenticated releases the place (on
+    // authentication); TakeUnauthenticated hands it to the caller (the engine,
+    // which keeps it while the stream closes).
+    void MarkUnauthenticated() noexcept { unauthenticated_.store(true); }
+    void LeaveUnauthenticated() noexcept;
+    bool TakeUnauthenticated() noexcept { return unauthenticated_.exchange(false); }
 
 private:
     struct Event {
@@ -117,6 +124,7 @@ private:
     bool delivering_ = false;
     bool read_paused_ = false;
     bool counted_active_ = false;
+    std::atomic<bool> unauthenticated_{false};
 };
 
 }  // namespace sg::server

@@ -232,6 +232,7 @@ Status Connection::HandleClientProofLocked(Lock& lock, const proto::DecodedFrame
     decoder_.SetMaxBuffered(proto::kHeaderSize + engine_->config().max_payload + proto::kAuthTagSize + 64 * 1024);
     opened_ = true;
     counted_active_ = true;
+    LeaveUnauthenticated();
     engine_->mutable_stats().auth_succeeded.fetch_add(1);
     engine_->mutable_stats().active_sessions.fetch_add(1);
 
@@ -639,6 +640,11 @@ bool Connection::IsAuthenticated()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return opened_ && !closed_;
+}
+
+void Connection::LeaveUnauthenticated() noexcept
+{
+    if (TakeUnauthenticated()) engine_->ReleaseUnauthenticated();
 }
 
 // ---- event delivery --------------------------------------------------------------------

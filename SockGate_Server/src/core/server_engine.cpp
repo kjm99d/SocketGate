@@ -8,6 +8,7 @@
 #include "sockgate_common/protocol/enrollment_token.h"
 #include "sockgate_common/tls/tls.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace sg::server {
@@ -38,6 +39,8 @@ Status ServerEngine::Create(EngineConfig config, EngineCallbacks callbacks, std:
         config.handshake_timeout_ms == 0) {
         return SG_INVALID_ARGUMENT;
     }
+    if (config.max_unauthenticated == 0) config.max_unauthenticated = std::max<uint32_t>(1, config.max_connections / 2);
+    if (config.max_unauthenticated > config.max_connections) return SG_INVALID_ARGUMENT;
     std::unique_ptr<ServerEngine> engine(new ServerEngine(std::move(config), std::move(callbacks)));
     EngineConfig& cfg = engine->config_;
 
@@ -161,6 +164,12 @@ void ServerEngine::StopImpl()
     io_->Stop();  // closes remaining streams, joins the workers
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
+        for (const auto& entry : connections_) {
+            if (entry.second->TakeUnauthenticated()) unauthenticated_.fetch_sub(1);
+        }
+        for (const auto& entry : closing_) {
+            if (entry.unauthenticated) unauthenticated_.fetch_sub(1);
+        }
         connections_.clear();
         closing_.clear();
     }
@@ -182,13 +191,23 @@ void ServerEngine::OnAccept(std::shared_ptr<AsyncStream> stream)
         // Capacity check and insertion are one atomic step; sockets in their
         // graceful-close phase still occupy descriptors and count too.
         std::lock_guard<std::mutex> lock(connections_mutex_);
-        if (stopping_.load() || connections_.size() + closing_.size() >= config_.max_connections) {
+        const char* refused = nullptr;
+        if (stopping_.load()) {
+            refused = "stopping";
+        } else if (connections_.size() + closing_.size() >= config_.max_connections) {
+            refused = "max_connections";
+        } else if (unauthenticated_.load() >= config_.max_unauthenticated) {
+            refused = "max_unauthenticated";
+        }
+        if (refused != nullptr) {
             SG_LOGW(config_.logger, "event=connection_refused peer=%s reason=%s", stream->PeerAddress().c_str(),
-                    stopping_.load() ? "stopping" : "max_connections");
+                    refused);
             stream->Close();
             return;
         }
-        connections_[handle] = conn;
+        connections_[handle] = conn;  // may throw: count only once inserted
+        unauthenticated_.fetch_add(1);
+        conn->MarkUnauthenticated();
     }
     stats_.total_connections.fetch_add(1);
     conn->Start();
@@ -198,7 +217,18 @@ void ServerEngine::OnConnectionClosed(const std::shared_ptr<Connection>& connect
 {
     std::lock_guard<std::mutex> lock(connections_mutex_);
     connections_.erase(connection->handle());
-    if (!connection->stream()->IsClosed()) closing_.emplace_back(connection->stream(), MonotonicMs());
+    // Closed before authenticating: the place is kept until the stream is gone.
+    const bool unauthenticated = connection->TakeUnauthenticated();
+    if (connection->stream()->IsClosed()) {
+        if (unauthenticated) unauthenticated_.fetch_sub(1);
+        return;
+    }
+    try {
+        closing_.push_back(ClosingStream{connection->stream(), MonotonicMs(), unauthenticated});
+    } catch (...) {
+        if (unauthenticated) unauthenticated_.fetch_sub(1);
+        connection->stream()->Close();
+    }
 }
 
 std::vector<std::shared_ptr<Connection>> ServerEngine::SnapshotConnections()
@@ -228,10 +258,12 @@ void ServerEngine::SweeperLoop()
                 const uint64_t now = MonotonicMs();  // taken under the lock that guards closing_
                 auto it = closing_.begin();
                 while (it != closing_.end()) {
-                    if (it->first->IsClosed()) {
+                    if (it->stream->IsClosed()) {
+                        if (it->unauthenticated) unauthenticated_.fetch_sub(1);
                         it = closing_.erase(it);
-                    } else if (ElapsedMs(now, it->second) > kGracefulCloseTimeoutMs) {
-                        force.push_back(std::move(it->first));
+                    } else if (ElapsedMs(now, it->since) > kGracefulCloseTimeoutMs) {
+                        force.push_back(it->stream);
+                        if (it->unauthenticated) unauthenticated_.fetch_sub(1);
                         it = closing_.erase(it);
                     } else {
                         ++it;
