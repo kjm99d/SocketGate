@@ -328,6 +328,7 @@ void TestProxy::Serve(sg::platform::NativeSocket socket)
         live_.push_back(upstream);
         last_target_ = host + ":" + std::to_string(port);
     }
+    if (options_.reply_delay_ms != 0) std::this_thread::sleep_for(std::chrono::milliseconds(options_.reply_delay_ms));
     switch (options_.kind) {
     case Kind::kHttpConnect:
         SendAll(*client, connected ? "HTTP/1.1 200 Connection established\r\n\r\n" : "HTTP/1.1 502 Bad Gateway\r\n\r\n");

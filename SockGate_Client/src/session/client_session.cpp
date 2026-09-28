@@ -221,6 +221,8 @@ Status ClientSession::Connect(const ServerTarget& target)
     }
 
     state_.store(SG_CLIENT_STATE_CONNECTING);
+    // One budget for TCP, the proxy and the TLS handshake together.
+    const Deadline connect_deadline(settings_.connect_timeout_ms);
     std::shared_ptr<net::ITransport> transport;
     const Status connected = OpenTransport(target, &transport);
     {
@@ -232,6 +234,15 @@ Status ClientSession::Connect(const ServerTarget& target)
                 static_cast<unsigned>(target.port), connected.name());
         state_.store(SG_CLIENT_STATE_CLOSED);
         return connected;
+    }
+
+    if (connect_deadline.Expired()) {
+        // TCP / the proxy used the whole budget: not a TLS failure.
+        SG_LOGW(settings_.logger, "event=connect_failed host=%s port=%u err=SG_TIMEOUT", target.host.c_str(),
+                static_cast<unsigned>(target.port));
+        transport->Close();
+        state_.store(SG_CLIENT_STATE_CLOSED);
+        return SG_TIMEOUT;
     }
 
     std::unique_ptr<tls::ITlsEngine> engine;
@@ -252,7 +263,9 @@ Status ClientSession::Connect(const ServerTarget& target)
         link_.generation = generation;
         state_.store(SG_CLIENT_STATE_TLS_HANDSHAKE);
     }
-    st = channel->Handshake(settings_.connect_timeout_ms);
+    // What the transport left of the budget (Handshake(0) would mean "no limit").
+    st = channel->Handshake(connect_deadline.infinite() ? 0u
+                                                        : std::max<uint32_t>(1, connect_deadline.RemainingMs(UINT32_MAX)));
     if (!st.ok()) {
         SG_LOGW(settings_.logger, "event=tls_failed host=%s err=%s detail=\"%s\"", target.host.c_str(), st.name(),
                 channel->ErrorDetail().c_str());

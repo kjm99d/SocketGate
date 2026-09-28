@@ -10,6 +10,7 @@
 #include <sockgate/client.h>
 #include <sockgate/server.h>
 
+#include <chrono>
 #include <cstring>
 #include <string>
 
@@ -195,6 +196,39 @@ SG_TEST(Proxy, Authentication)
         ClientPtr anon = NewClient(&none, "auth-none");
         SG_EXPECT_STATUS(SG_Client_Connect(anon.get(), &t), SG_PROXY_ERROR);
     }
+}
+
+SG_TEST(Proxy, ConnectTimeoutCoversProxyAndTls)
+{
+    // A slow proxy in front of a server that never answers the TLS handshake:
+    // connect_timeout_ms bounds the whole connect, the handshake does not get
+    // a fresh budget after the proxy took most of it.
+    TestProxy::Options silent_options;
+    silent_options.misbehaviour = TestProxy::Misbehaviour::kSilent;
+    TestProxy silent_server(silent_options);  // accepts, reads, never answers
+    TestProxy::Options slow_options;
+    slow_options.reply_delay_ms = 1200;
+    TestProxy slow_proxy(slow_options);
+    const SG_ProxyConfig pc = Explicit(SG_PROXY_TYPE_HTTP_CONNECT, slow_proxy.port());
+
+    SG_ClientConfig cfg;
+    SG_ClientConfig_Init(&cfg);
+    cfg.identity_name = "timeout-app";
+    cfg.key_store_type = SG_KEYSTORE_MEMORY;
+    cfg.proxy = &pc;
+    cfg.connect_timeout_ms = 2000;
+    SG_Client* raw = nullptr;
+    SG_ASSERT_OK(SG_Client_Create(&cfg, &raw));
+    ClientPtr client(raw);
+    const std::string ca = RealCa().cert_pem;
+    const SG_ServerConfig t = Target(silent_server.port(), ca);
+    const auto start = std::chrono::steady_clock::now();
+    SG_EXPECT_STATUS(SG_Client_Connect(client.get(), &t), SG_TIMEOUT);
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    SG_EXPECT(slow_proxy.tunnels() == 1);  // the proxy part succeeded
+    SG_EXPECT(ms >= 1900);                 // ...and the budget was used up
+    SG_EXPECT(ms < 2900);                  // a fresh TLS budget would take ~3200 ms
 }
 
 SG_TEST(Proxy, HostileOrBrokenProxies)

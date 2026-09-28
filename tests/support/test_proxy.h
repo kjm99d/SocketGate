@@ -46,6 +46,7 @@ public:
         std::string required_user;
         std::string required_password;
         Misbehaviour misbehaviour = Misbehaviour::kNone;
+        uint32_t reply_delay_ms = 0;  // delay before the "connected" reply
     };
 
     explicit TestProxy(Options options);
