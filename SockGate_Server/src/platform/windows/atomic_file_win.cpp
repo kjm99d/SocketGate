@@ -57,7 +57,14 @@ Status OwnerOnlySecurityDescriptor(PSECURITY_DESCRIPTOR* out)
 class WinStoreLock final : public StoreLock {
 public:
     explicit WinStoreLock(HANDLE h) : h_(h) {}
-    ~WinStoreLock() override { CloseHandle(h_); }  // also releases the byte-range lock
+    ~WinStoreLock() override
+    {
+        // Unlock explicitly: the release implied by CloseHandle may be
+        // deferred, and a store reopened right away would find it still held.
+        OVERLAPPED at{};
+        UnlockFileEx(h_, 0, 1, 0, &at);
+        CloseHandle(h_);
+    }
 
 private:
     HANDLE h_;
