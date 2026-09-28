@@ -155,7 +155,8 @@ std::vector<std::vector<uint8_t>> SockGateFuzzSeeds()
     auto snapshot = [&](uint8_t selector) {
         std::ifstream f(FilePath(), std::ios::binary);
         std::vector<uint8_t> v = {selector};
-        v.insert(v.end(), std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        const std::vector<uint8_t> content = SockGateReadAllBytes(f);
+        v.insert(v.end(), content.begin(), content.end());
         seeds.push_back(v);
     };
     // A registry with two installations.

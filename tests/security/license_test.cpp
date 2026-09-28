@@ -199,7 +199,7 @@ SG_TEST(LicenseStore, FilePersistenceAndCorruption)
     Bytes data;
     {
         std::ifstream f(path, std::ios::binary);
-        data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        data = sgtest::ReadAllBytes(f);
     }
     auto write = [&](const Bytes& bytes) {
         std::ofstream f(path, std::ios::binary | std::ios::trunc);

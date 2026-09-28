@@ -17,6 +17,26 @@
 
 namespace sgtest {
 
+// Reads a whole binary stream into bytes. Copies explicitly: building a
+// std::vector<uint8_t> from istreambuf_iterator<char> converts char to
+// uint8_t implicitly (flagged by -fsanitize=integer) and trips GCC's
+// -Wnull-dereference inside libstdc++.
+inline std::vector<uint8_t> ReadAllBytes(std::istream& in)
+{
+    std::vector<uint8_t> out;
+    char buf[4096];
+    for (;;) {
+        in.read(buf, sizeof(buf));
+        const std::streamsize n = in.gcount();
+        if (n > 0) {
+            const auto* p = reinterpret_cast<const uint8_t*>(buf);
+            out.insert(out.end(), p, p + n);
+        }
+        if (!in) break;
+    }
+    return out;
+}
+
 struct TestCase {
     const char* suite;
     const char* name;

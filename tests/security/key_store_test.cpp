@@ -80,7 +80,7 @@ private:
 Bytes ReadFileBytes(const fs::path& p)
 {
     std::ifstream f(p, std::ios::binary);
-    return Bytes(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return sgtest::ReadAllBytes(f);
 }
 
 void WriteFileBytes(const fs::path& p, const Bytes& data)

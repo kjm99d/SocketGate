@@ -90,7 +90,7 @@ bool ReadFile(const char* path, Input* out)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
-    out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    *out = SockGateReadAllBytes(f);
     return true;
 }
 

@@ -748,7 +748,7 @@ SG_TEST(Registry, FilePersistenceAndCorruption)
         Bytes data;
         {
             std::ifstream f(path, std::ios::binary);
-            data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+            data = sgtest::ReadAllBytes(f);
         }
         data[10 + 16 + 30] ^= 0xFF;
         {

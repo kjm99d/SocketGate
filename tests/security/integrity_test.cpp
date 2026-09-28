@@ -41,7 +41,7 @@ crypto::Sha256Digest HashOfOwnExecutable()
     std::ifstream f("/proc/self/exe", std::ios::binary);
 #endif
     SG_ASSERT(f.good());
-    const Bytes content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const Bytes content = sgtest::ReadAllBytes(f);
     crypto::Sha256Digest digest;
     SG_ASSERT_OK(crypto::Sha256(content, &digest));
     return digest;

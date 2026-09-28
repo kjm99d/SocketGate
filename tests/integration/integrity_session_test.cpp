@@ -31,7 +31,7 @@ SG_Sha256 OwnExecutableHash()
 #else
     std::ifstream f("/proc/self/exe", std::ios::binary);
 #endif
-    const sg::Bytes content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const sg::Bytes content = sgtest::ReadAllBytes(f);
     sg::crypto::Sha256Digest digest;
     SG_ASSERT_OK(sg::crypto::Sha256(content, &digest));
     SG_Sha256 out;
