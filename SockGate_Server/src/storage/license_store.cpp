@@ -51,7 +51,7 @@ public:
         target.max_installations = record.max_installations;
         target.status = LicenseStatus::kActive;
         target.seats_used = 0;
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) {
             if (existed) {
                 licenses_[record.license_id].terms = previous;
@@ -67,10 +67,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = licenses_.find(license_id);
         if (it == licenses_.end()) return SG_NOT_FOUND;
-        if (it->second.terms.status == LicenseStatus::kRevoked) return OkStatus();
+        // Stays revoked in memory even if it cannot be persisted; calling
+        // Revoke again (for any license) retries the write until it succeeds.
+        if (it->second.terms.status == LicenseStatus::kRevoked && !revocation_unsaved_) return OkStatus();
         it->second.terms.status = LicenseStatus::kRevoked;
-        // Stays revoked in memory even if it cannot be persisted.
-        return PersistLocked().ok() ? OkStatus() : Status(SG_STORAGE_ERROR);
+        if (!SaveLocked().ok()) {
+            revocation_unsaved_ = true;
+            return SG_STORAGE_ERROR;
+        }
+        return OkStatus();
     }
 
     Status BindSeat(const std::string& license_id, const proto::InstallationId& installation,
@@ -89,7 +94,7 @@ public:
         }
         if (entry.seats.size() >= kMaxSeatsPerLicense) return SG_LIMIT_EXCEEDED;
         entry.seats.insert(installation);
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) {
             entry.seats.erase(installation);
             return st;
@@ -104,7 +109,7 @@ public:
         auto it = licenses_.find(license_id);
         if (it == licenses_.end()) return SG_NOT_FOUND;
         if (it->second.seats.erase(installation) == 0) return SG_NOT_FOUND;
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) it->second.seats.insert(installation);
         return st;
     }
@@ -126,7 +131,17 @@ public:
 protected:
     virtual Status PersistLocked() { return OkStatus(); }
 
+    // Every successful write stores the whole state, including a revocation
+    // whose own write failed earlier.
+    Status SaveLocked()
+    {
+        const Status st = PersistLocked();
+        if (st.ok()) revocation_unsaved_ = false;
+        return st;
+    }
+
     std::mutex mutex_;
+    bool revocation_unsaved_ = false;
     std::map<std::string, Entry> licenses_;
 };
 

@@ -638,7 +638,42 @@ SG_TEST(Registry, RevocationSurvivesStorageFailure)
     ClientRecord after;
     SG_ASSERT_OK(reg->Find(id.installation_id, &after));
     SG_EXPECT(after.status == ClientStatus::kRevoked);
-    SG_EXPECT_OK(reg->Revoke(id.installation_id));  // idempotent from now on
+    // Calling it again retries the write: still failing...
+    SG_EXPECT_STATUS(reg->Revoke(id.installation_id), SG_STORAGE_ERROR);
+    // ...until the storage works again, and then it is durable.
+    fs::remove(dir / "registry.bin");
+    SG_EXPECT_OK(reg->Revoke(id.installation_id));
+    reg.reset();
+    SG_ASSERT_OK(CreateFileClientRegistry((dir / "registry.bin").string(), &reg));
+    SG_ASSERT_OK(reg->Find(id.installation_id, &after));
+    SG_EXPECT(after.status == ClientStatus::kRevoked);
+    reg.reset();
+    fs::remove_all(dir);
+}
+
+SG_TEST(Registry, DuplicateUsedTokensAreCorruption)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-registry-dup-" + std::to_string(sg::MonotonicMs()));
+    fs::create_directories(dir);
+    const fs::path file = dir / "registry.bin";
+    // "SGRG" v1, no records, the same used token twice.
+    std::vector<uint8_t> data = {'S', 'G', 'R', 'G', 0, 1, 0, 0, 0, 0, 0, 0, 0, 2};
+    for (int i = 0; i < 2; ++i) {
+        data.insert(data.end(), 16, 0xAB);
+        data.insert(data.end(), 8, 0);
+    }
+    auto write = [&]() {
+        std::ofstream f(file, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    };
+    write();
+    std::unique_ptr<IClientRegistry> reg;
+    SG_EXPECT_STATUS(CreateFileClientRegistry(file.string(), &reg), SG_STORAGE_ERROR);
+    data[13] = 1;  // one copy loads
+    data.resize(14 + 24);
+    write();
+    SG_EXPECT_OK(CreateFileClientRegistry(file.string(), &reg));
     reg.reset();
     fs::remove_all(dir);
 }

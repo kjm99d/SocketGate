@@ -263,10 +263,19 @@ SG_TEST(LicenseStore, RevocationSurvivesStorageFailure)
     SG_EXPECT_STATUS(store->Find("L2", &rec), SG_NOT_FOUND);
     SG_EXPECT(!store->ReleaseSeat("L1", Iid(1)).ok());
     SG_EXPECT_OK(store->HasSeat("L1", Iid(1)));
+    // Revoking again retries the write until it succeeds.
+    SG_EXPECT_STATUS(store->Revoke("L1"), SG_STORAGE_ERROR);
 
     // The store is locked while open.
     std::unique_ptr<ILicenseStore> second;
     SG_EXPECT_STATUS(CreateFileLicenseStore((dir / "licenses.bin").string(), &second), SG_INVALID_STATE);
+
+    fs::remove(dir / "licenses.bin");
+    SG_EXPECT_OK(store->Revoke("L1"));
+    store.reset();
+    SG_ASSERT_OK(CreateFileLicenseStore((dir / "licenses.bin").string(), &store));
+    SG_ASSERT_OK(store->Find("L1", &rec));
+    SG_EXPECT(rec.status == LicenseStatus::kRevoked);
     store.reset();
     fs::remove_all(dir);
 }

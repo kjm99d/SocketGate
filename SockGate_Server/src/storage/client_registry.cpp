@@ -38,7 +38,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (records_.count(record.installation_id) != 0) return SG_ALREADY_EXISTS;
         records_[record.installation_id] = record;
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) records_.erase(record.installation_id);
         return st;
     }
@@ -48,9 +48,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = records_.find(id);
         if (it == records_.end()) return SG_NOT_FOUND;
-        if (it->second.status == ClientStatus::kRevoked) return OkStatus();
+        // Stays revoked in memory even if it cannot be persisted; calling
+        // Revoke again (for any record) retries the write until it succeeds.
+        if (it->second.status == ClientStatus::kRevoked && !revocation_unsaved_) return OkStatus();
         it->second.status = ClientStatus::kRevoked;
-        return PersistLocked().ok() ? OkStatus() : Status(SG_STORAGE_ERROR);
+        if (!SaveLocked().ok()) {
+            revocation_unsaved_ = true;
+            return SG_STORAGE_ERROR;
+        }
+        return OkStatus();
     }
 
     Status EnrollAtomically(const ClientRecord& record, const proto::TokenId& token_id,
@@ -61,7 +67,7 @@ public:
         if (tokens_.count(token_id) != 0 || records_.count(record.installation_id) != 0) return SG_ALREADY_EXISTS;
         records_[record.installation_id] = record;
         tokens_[token_id] = TokenEntry{token_expires_at_ms};
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) {
             records_.erase(record.installation_id);
             tokens_.erase(token_id);
@@ -92,7 +98,7 @@ public:
         const ClientRecord previous = rec;
         rec.product_id = product_id;
         rec.license_id = license_id;
-        const Status st = PersistLocked();
+        const Status st = SaveLocked();
         if (!st.ok()) rec = previous;
         return st;
     }
@@ -131,7 +137,17 @@ protected:
 
     virtual Status PersistLocked() { return OkStatus(); }
 
+    // Every successful write stores the whole state, including a revocation
+    // whose own write failed earlier.
+    Status SaveLocked()
+    {
+        const Status st = PersistLocked();
+        if (st.ok()) revocation_unsaved_ = false;
+        return st;
+    }
+
     std::mutex mutex_;
+    bool revocation_unsaved_ = false;
     std::map<proto::InstallationId, ClientRecord> records_;
     std::map<proto::TokenId, TokenEntry> tokens_;
 };
@@ -188,8 +204,9 @@ private:
         for (uint32_t i = 0; i < token_count; ++i) {
             proto::TokenId id;
             uint64_t expires = 0;
-            if (!r.Fixed(&id).ok() || !r.U64(&expires).ok()) return SG_STORAGE_ERROR;
-            tokens_[id] = TokenEntry{expires};
+            if (!r.Fixed(&id).ok() || !r.U64(&expires).ok() || !tokens_.emplace(id, TokenEntry{expires}).second) {
+                return SG_STORAGE_ERROR;
+            }
         }
         return r.ExpectEnd().ok() ? OkStatus() : Status(SG_STORAGE_ERROR);
     }
@@ -216,6 +233,8 @@ private:
             w.Raw(entry.first);
             w.U64(entry.second.expires_at_ms);
         }
+        // Never write a file that Load() would refuse.
+        if (out.size() > kMaxStorageFileSize) return SG_LIMIT_EXCEEDED;
         return WriteFileAtomically(path_, out);
     }
 
