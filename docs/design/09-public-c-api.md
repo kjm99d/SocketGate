@@ -195,7 +195,35 @@ typedef struct SG_LicenseRecord {
 - `SG_ServerSessionInfo.license_id` 는 registry 바인딩 또는 검증된 라이선스만 보여준다 (클라이언트 주장 원문은 아님).
   `license_status` 가 VALID/UNKNOWN 을 구분한다.
 
-### 5.2 콜백
+### 5.2 Integrity 정책
+
+클라이언트가 `SG_CLIENT_FLAG_INTEGRITY_REPORT` 로 보낸 관측(`SG_INTEGRITY_*`)과 서버가 판단한 조건
+(`SG_INTEGRITY_REPORT_MISSING`: 보고 없음, `SG_INTEGRITY_UNKNOWN_EXECUTABLE`: allowlist 에 없는 실행 파일 해시)을 합친
+값이 `SG_AuthRequest.integrity_conditions` 이다. `SG_ServerOptions` 로 정책을 정한다.
+
+| 필드 | 의미 |
+|---|---|
+| `integrity_reject_mask` | 조건이 겹치면 인증 거부 (Fail) |
+| `integrity_restrict_mask` | 조건이 겹치면 `SG_SESSION_POLICY_RESTRICTED` (Restricted) |
+| `allowed_executables` / `allowed_executable_count` | 실행 파일 SHA-256 allowlist (최대 4096). 비어 있으면 검사하지 않음 |
+
+- 보고는 **신뢰를 낮추는 데만** 쓰인다 (Normal → Restricted → Fail). 프로토콜 v1 에 정의되지 않은 관측 비트는
+  CLIENT_HELLO 디코딩 단계에서 프로토콜 오류다 (새 관측은 새 프로토콜 버전과 함께 추가한다). 인가 단계는 알려진
+  비트만 다시 마스킹한다 (다층 방어).
+- 판정은 라이선스 검사 뒤, `on_authorize` 이전에 한다. reject 가 restrict 보다 우선하며 `on_authorize` 는 호출되지 않는다.
+  integrity 로 RESTRICTED 가 된 세션은 `on_authorize` 가 policy 를 바꿔도 RESTRICTED 로 남는다 (하한).
+- 마스크에 이 빌드가 평가할 수 없는 비트가 있으면 `SG_SERVER_OPT` 와 마찬가지로 `SG_NOT_SUPPORTED`, allowlist 에
+  0 으로만 된 항목이 있으면 `SG_INVALID_ARGUMENT`. allowlist 가 있는데 `SG_INTEGRITY_UNKNOWN_EXECUTABLE` 이 어느
+  마스크에도 없으면 효과가 없으므로 경고 로그를 남긴다.
+- 재인증(refresh)은 처음 CLIENT_HELLO 의 보고를 그대로 쓴다 (세션 중 새로 붙은 디버거는 보이지 않음).
+- 플래그가 **없다는 것**은 아무것도 증명하지 않는다: platform 값 자체가 주장이며 (예: Windows 전용 관측을 피하려
+  `LINUX` 로 보고 가능), Linux 는 `UNSIGNED_EXECUTABLE` 을 설정하지 않는다. Windows 서명 검사는 내장(embedded)
+  Authenticode 만 보므로 카탈로그 서명 파일은 unsigned 로 보고되고, UNC 경로 실행 파일은 네트워크 I/O 를 일으킨다.
+- RESTRICTED 의 의미(기능 제한 등)는 애플리케이션이 정한다. SockGate 는 정책 값을 세션 정보로 전달한다.
+- 클라이언트는 알 수 없는 `SG_CLIENT_FLAG_*` 를 `SG_NOT_SUPPORTED` 로 거부한다 (조용히 무시하지 않음). 실행 파일
+  해시는 `SG_Client_Create` 에서 미리 계산하고 성공한 결과만 캐시한다 (일시적 실패는 다음 인증에서 재시도).
+
+### 5.3 콜백
 
 ```c
 typedef struct SG_ServerCallbacks {
@@ -222,6 +250,15 @@ typedef struct SG_ServerCallbacks {
 ## 6. ABI / 버전 정책
 
 - `SOCKGATE_API_VERSION` 은 호환되지 않는 ABI 변경 시에만 증가한다.
+- **입력** 구조체(`SG_ClientConfig`, `SG_ServerConfig`, `SG_ProxyConfig`, `SG_ServerOptions`, `SG_ServerCallbacks`,
+  `SG_ClientRecord`, `SG_EnrollmentTokenRequest`, `SG_LicenseRecord`)에서 라이브러리가 모르는 뒤쪽 필드(`size` 가
+  라이브러리의 구조체보다 큼)는 **0 이어야 한다**. 0 이 아니면 `SG_NOT_SUPPORTED` — 새 헤더로 빌드한 애플리케이션이
+  옛 라이브러리에서 보안 설정을 조용히 잃지 않게 한다. 알려진 크기보다 4 KiB 넘게 크면 `SG_INVALID_ARGUMENT`.
+- 그래서 공개 입력 구조체는 끝에 암묵적 padding 이 없어야 하고(필요하면 명시적 `reserved` 멤버), 라이브러리가
+  `static_assert` 로 검증한다. 애플리케이션은 `*_Init()` 으로 초기화한다.
+- `*_VERSION` 은 모두 1 에서 시작한다. 첫 릴리스(0.1.0) 이전의 필드 추가는 버전 1 에 포함되며, 그 이후
+  필드를 추가할 때마다 올린다.
+- 공유 라이브러리는 헤더에 `SG_*_API` 로 선언된 함수만 정확히 export 한다 (CTest `sg_exports_*` 가 검증).
 - 구조체에는 끝에만 필드를 추가하고 `*_VERSION` 상수를 올린다. 라이브러리는 `size` 로 구 구조체를 인식한다.
 - 공유 라이브러리 SONAME/DLL 이름에 major 버전을 포함한다 (`libsockgate_client.so.1`, `sockgate_client.dll` + 리소스 버전).
 - Linux 는 `-fvisibility=hidden` + `SG_*_API` 로만 export, Windows 는 `__declspec(dllexport)` 로만 export 한다.

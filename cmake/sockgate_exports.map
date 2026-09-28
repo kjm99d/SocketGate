@@ -1,0 +1,7 @@
+/* ELF export list for the SockGate shared libraries: only the C ABI. */
+{
+    global:
+        SG_*;
+    local:
+        *;
+};

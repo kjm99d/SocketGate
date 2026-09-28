@@ -71,6 +71,11 @@ typedef void (SG_CALL *SG_LogCallback)(void* user, uint32_t level, const char* m
 #define SG_INTEGRITY_HASH_UNAVAILABLE     (1u << 8)
 #define SG_INTEGRITY_KNOWN_FLAGS          0x000001FFu
 
+/* Platform of an integrity report. */
+#define SG_INTEGRITY_PLATFORM_WINDOWS 1u
+#define SG_INTEGRITY_PLATFORM_LINUX   2u
+#define SG_INTEGRITY_PLATFORM_MACOS   3u
+
 /* ---- Per-message metadata ----------------------------------------------- */
 #define SG_MESSAGE_FLAG_ENCRYPTED (1u << 0) /* payload used application-layer AEAD */
 #define SG_MESSAGE_FLAG_RESPONSE  (1u << 1) /* request_id refers to the receiver's own request */

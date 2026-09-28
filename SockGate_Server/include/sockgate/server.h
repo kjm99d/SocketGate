@@ -21,6 +21,11 @@
  *    nothing;
  *  - with SG_SERVER_OPT_REQUIRE_LICENSE every session without a verified
  *    license is denied;
+ *  - integrity policy: the client's SG_INTEGRITY_* observations plus the
+ *    server-side conditions below are matched against
+ *    SG_ServerOptions.integrity_reject_mask (deny) and
+ *    integrity_restrict_mask (SG_SESSION_POLICY_RESTRICTED). Reports can only
+ *    lower trust: they are claims of a machine the attacker may control;
  *  - after on_authorize allowed the session it takes a seat of the license
  *    (up to max_installations; no free seat = denial). A seat is an
  *    activation, kept until SG_Server_ReleaseLicenseSeat or
@@ -59,6 +64,11 @@ typedef struct SG_Server SG_Server;
 #define SG_AUTH_MODE_AUTHENTICATE 1u
 #define SG_AUTH_MODE_ENROLL       2u
 
+/* Integrity conditions evaluated by the server (in addition to the client's
+ * SG_INTEGRITY_* observations) for the integrity masks and SG_AuthRequest. */
+#define SG_INTEGRITY_REPORT_MISSING      (1u << 30) /* the client sent no integrity report */
+#define SG_INTEGRITY_UNKNOWN_EXECUTABLE  (1u << 31) /* allowlist configured, executable hash not in it */
+
 /* SG_AuthRequest.license_status: result of the built-in license check. */
 #define SG_LICENSE_STATUS_NONE    0u /* no license registered or claimed */
 #define SG_LICENSE_STATUS_VALID   1u /* verified against the license store */
@@ -91,6 +101,8 @@ typedef struct SG_AuthRequest {
     uint32_t license_status;            /* SG_LICENSE_STATUS_* (server-verified) */
     uint32_t reserved1;
     uint64_t license_features;          /* entitlement of a VALID license, else 0 */
+    uint32_t integrity_conditions;      /* reported flags + server conditions (see masks) */
+    uint32_t reserved2;
 } SG_AuthRequest;
 
 /* Pre-filled with the built-in decision; the callback may change it (the
@@ -208,6 +220,12 @@ typedef struct SG_ServerOptions {
     uint32_t reserved2;
 
     const char* license_path;          /* NULL = in-memory license store; must differ from registry_path */
+
+    /* Integrity policy (see the header comment). 0 = ignore reports. */
+    uint32_t integrity_restrict_mask;
+    uint32_t integrity_reject_mask;
+    const SG_Sha256* allowed_executables;  /* optional allowlist of executable SHA-256 values */
+    size_t allowed_executable_count;       /* <= 4096 */
 } SG_ServerOptions;
 
 #define SG_CLIENT_RECORD_VERSION 1u

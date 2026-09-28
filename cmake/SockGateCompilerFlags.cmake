@@ -70,6 +70,14 @@ function(sockgate_configure_target target)
         if(SOCKGATE_WERROR)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
+        if(_type STREQUAL "SHARED_LIBRARY")
+            # ABI rule (independent of SOCKGATE_HARDENING): export nothing but
+            # the C ABI, not even weak C++ template symbols.
+            target_link_options(${target} PRIVATE
+                "-Wl,--version-script=${PROJECT_SOURCE_DIR}/cmake/sockgate_exports.map")
+            set_property(TARGET ${target} APPEND PROPERTY
+                LINK_DEPENDS "${PROJECT_SOURCE_DIR}/cmake/sockgate_exports.map")
+        endif()
         if(SOCKGATE_HARDENING)
             target_compile_options(${target} PRIVATE -fstack-protector-strong)
             _sg_add_cxx_flag_if_supported(${target} PRIVATE -fstack-clash-protection)

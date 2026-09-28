@@ -90,14 +90,17 @@ Software KSP 의 키는 Windows 가 DPAPI 로 보호하는 사용자 프로필 �
 
 | 관측 | 방법 | flag |
 |---|---|---|
-| 실행 파일 해시 | `GetModuleFileNameW(NULL)` → SHA-256 | (값 전송) |
-| SockGate DLL 해시 | `GetModuleHandleExW(FROM_ADDRESS)` → 파일 SHA-256 | (값 전송) |
-| 코드 서명 | `WinVerifyTrust(WINTRUST_ACTION_GENERIC_VERIFY_V2)` (네트워크 revocation 조회 없음) | `UNSIGNED_EXECUTABLE` |
+| 실행 파일 해시 | `GetModuleFileNameW(NULL)` → SHA-256 (프로세스당 1회, 캐시) | (값 전송) |
+| SockGate DLL 해시 | `GetModuleHandleExW(FROM_ADDRESS)` → 파일 SHA-256 (정적 링크면 실행 파일 해시 재사용). 해시는 성공한 것만 캐시 | (값 전송) |
+| 코드 서명 | `WinVerifyTrust(WINTRUST_ACTION_GENERIC_VERIFY_V2)`, `WTD_REVOKE_NONE`, `WTD_CACHE_ONLY_URL_RETRIEVAL`, UI 없음. 확정 결과(서명됨 / FACILITY_CERT 판정)만 캐시 | `UNSIGNED_EXECUTABLE` |
 | 디버거 | `IsDebuggerPresent`, `CheckRemoteDebuggerPresent` | `DEBUGGER_PRESENT` |
-| ASLR / DEP / CFG | `GetProcessMitigationPolicy` | `ASLR_DISABLED`, `DEP_DISABLED`, `CFG_DISABLED` |
-| 로드 모듈 | `EnumProcessModules` + 서명 여부(선택, 비용 큼) | `UNEXPECTED_MODULES` |
+| ASLR | 실행 파일 PE 헤더의 `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE` | `ASLR_DISABLED` |
+| DEP / CFG | `GetProcessMitigationPolicy(ProcessDEPPolicy / ProcessControlFlowGuardPolicy)` (64-bit 는 DEP 항상 켜짐) | `DEP_DISABLED`, `CFG_DISABLED` |
+| 로드 모듈 | `EnumProcessModules`, 사용자 temp 디렉터리에서 로드된 모듈 (8.3 짧은 경로는 `GetLongPathNameW` 로 정규화해 비교) | `UNEXPECTED_MODULES` |
+| 해시 실패 | 파일을 읽지 못함 | `HASH_UNAVAILABLE` |
 
-모든 관측은 **우회 가능**하며 서버 정책의 입력일 뿐이다.
+`SG_CLIENT_FLAG_INTEGRITY_REPORT` 가 있으면 인증(Authenticate/Enroll)마다 수집해 CLIENT_HELLO 에 싣는다.
+모든 관측은 **우회 가능**하며 서버 정책의 입력일 뿐이다 (09 §5.2).
 
 ## 4. 빌드 Hardening (MSVC / clang-cl)
 

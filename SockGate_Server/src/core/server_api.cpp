@@ -4,6 +4,7 @@
 #include "core/server_engine.h"
 #include "storage/atomic_file.h"
 
+#include "sockgate_common/core/abi.h"
 #include "sockgate_common/crypto/crypto.h"
 #include "sockgate_common/protocol/transcript.h"
 
@@ -15,6 +16,12 @@
 #include <new>
 #include <string>
 #include <system_error>
+
+SG_ASSERT_NO_TAIL_PADDING(SG_ServerOptions, allowed_executable_count);
+SG_ASSERT_NO_TAIL_PADDING(SG_ServerCallbacks, on_session_closed);
+SG_ASSERT_NO_TAIL_PADDING(SG_ClientRecord, license_id);
+SG_ASSERT_NO_TAIL_PADDING(SG_EnrollmentTokenRequest, reserved);
+SG_ASSERT_NO_TAIL_PADDING(SG_LicenseRecord, reserved);
 
 struct SG_Server {
     // Declared before `engine`: the engine's callbacks point into this copy,
@@ -164,6 +171,7 @@ sg::server::EngineCallbacks BridgeCallbacks(SG_Server* server)
             req.registered_license_id = r.record != nullptr ? r.record->license_id.c_str() : kEmpty;
             req.license_status = static_cast<uint32_t>(r.license_status);
             req.license_features = r.license_features;
+            req.integrity_conditions = r.integrity_conditions;
 
             SG_AuthDecision dec;
             std::memset(&dec, 0, sizeof(dec));
@@ -239,6 +247,7 @@ sg::server::EngineCallbacks BridgeCallbacks(SG_Server* server)
 Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::EngineConfig* cfg)
 {
     if (o->version == 0 || !SG_HAS_FIELD(o, SG_ServerOptions, tls_private_key_pem_size)) return SG_INVALID_ARGUMENT;
+    SG_TRY(sg::CheckUnknownTail(o, o->size, sizeof(SG_ServerOptions)));
     std::string bind;
     if (!CopyCString(o->bind_address, 253, &bind)) return SG_INVALID_ARGUMENT;
     if (!bind.empty()) cfg->bind_address = bind;
@@ -299,6 +308,7 @@ Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::En
     if (SG_HAS_FIELD(o, SG_ServerOptions, callbacks) && o->callbacks != nullptr) {
         const SG_ServerCallbacks* c = o->callbacks;
         if (c->version == 0 || !SG_HAS_FIELD(c, SG_ServerCallbacks, user)) return SG_INVALID_ARGUMENT;
+        SG_TRY(sg::CheckUnknownTail(c, c->size, sizeof(SG_ServerCallbacks)));
         // Copy field by field: a caller size ending inside a function pointer
         // must never produce a half-copied pointer.
         SG_ServerCallbacks& dst = server->callbacks;
@@ -321,6 +331,28 @@ Status ParseOptions(const SG_ServerOptions* o, SG_Server* server, sg::server::En
     }
     if (!cfg->registry_path.empty() && !cfg->license_path.empty() && SameFile(cfg->registry_path, cfg->license_path)) {
         return SG_INVALID_ARGUMENT;
+    }
+    if (SG_HAS_FIELD(o, SG_ServerOptions, allowed_executable_count)) {
+        constexpr uint32_t kKnownConditions =
+            SG_INTEGRITY_KNOWN_FLAGS | SG_INTEGRITY_REPORT_MISSING | SG_INTEGRITY_UNKNOWN_EXECUTABLE;
+        if (((o->integrity_restrict_mask | o->integrity_reject_mask) & ~kKnownConditions) != 0) {
+            return SG_NOT_SUPPORTED;  // a condition this build cannot evaluate
+        }
+        cfg->integrity.restrict_mask = o->integrity_restrict_mask;
+        cfg->integrity.reject_mask = o->integrity_reject_mask;
+        if (o->allowed_executable_count > 4096 ||
+            (o->allowed_executable_count != 0 && o->allowed_executables == nullptr)) {
+            return SG_INVALID_ARGUMENT;
+        }
+        for (size_t i = 0; i < o->allowed_executable_count; ++i) {
+            sg::crypto::Sha256Digest digest;
+            std::memcpy(digest.data(), o->allowed_executables[i].bytes, digest.size());
+            // An all-zero entry would match every report whose hash failed.
+            if (std::all_of(digest.begin(), digest.end(), [](uint8_t b) { return b == 0; })) {
+                return SG_INVALID_ARGUMENT;
+            }
+            cfg->integrity.allowed_executables.push_back(digest);
+        }
     }
     return sg::OkStatus();
 }
@@ -492,6 +524,7 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_RegisterClient(SG_Server* server, cons
         return SG_INVALID_ARGUMENT;
     }
     return Guard([&]() -> Status {
+        SG_TRY(sg::CheckUnknownTail(record, record->size, sizeof(SG_ClientRecord)));
         sg::server::ClientRecord rec;
         std::memcpy(rec.public_key.data(), record->public_key.bytes, rec.public_key.size());
         SG_TRY(sg::crypto::ValidateP256PublicKey(rec.public_key));
@@ -526,6 +559,7 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_IssueEnrollmentToken(SG_Server* server
     }
     *written = 0;
     return Guard([&]() -> Status {
+        SG_TRY(sg::CheckUnknownTail(request, request->size, sizeof(SG_EnrollmentTokenRequest)));
         std::string product;
         std::string license;
         if (!CopyCString(request->product_id, sg::proto::kMaxProductIdLength, &product) ||
@@ -553,6 +587,7 @@ SG_SERVER_API SG_Status SG_CALL SG_Server_AddLicense(SG_Server* server, const SG
         return SG_INVALID_ARGUMENT;
     }
     return Guard([&]() -> Status {
+        SG_TRY(sg::CheckUnknownTail(license, license->size, sizeof(SG_LicenseRecord)));
         sg::server::LicenseRecord rec;
         if (!CopyCString(license->license_id, sg::proto::kMaxLicenseIdLength, &rec.license_id) ||
             !CopyCString(license->product_id, sg::proto::kMaxProductIdLength, &rec.product_id)) {

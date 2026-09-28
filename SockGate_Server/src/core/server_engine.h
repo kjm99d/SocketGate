@@ -6,6 +6,7 @@
 #pragma once
 
 #include "auth/authorizer.h"
+#include "auth/builtin_authorizer.h"
 #include "auth/server_handshake.h"
 #include "storage/client_registry.h"
 #include "storage/license_store.h"
@@ -64,6 +65,7 @@ struct EngineConfig {
     std::string license_path;
     bool require_license = false;
     bool allow_license_activation = false;
+    IntegrityPolicy integrity;
     uint32_t worker_threads = 0;
     uint32_t max_connections = 10'000;
     uint32_t handshake_timeout_ms = 15'000;

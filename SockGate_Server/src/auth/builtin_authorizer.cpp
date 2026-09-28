@@ -2,6 +2,11 @@
 
 #include "sockgate_common/core/clock.h"
 
+#include <sockgate/types.h>
+
+#include <algorithm>
+#include <cstdio>
+
 namespace sg::server {
 namespace {
 
@@ -14,6 +19,20 @@ Status Deny(AuthorizationDecision* decision, const char* reason)
 }
 
 }  // namespace
+
+uint32_t EvaluateIntegrityConditions(const AuthorizationRequest& request, const IntegrityPolicy& policy)
+{
+    if (!request.has_integrity) {
+        return kIntegrityReportMissing | (policy.allowed_executables.empty() ? 0u : kIntegrityUnknownExecutable);
+    }
+    uint32_t conditions = request.integrity.observation_flags & SG_INTEGRITY_KNOWN_FLAGS;
+    if (!policy.allowed_executables.empty() &&
+        std::find(policy.allowed_executables.begin(), policy.allowed_executables.end(),
+                  request.integrity.executable_sha256) == policy.allowed_executables.end()) {
+        conditions |= kIntegrityUnknownExecutable;
+    }
+    return conditions;
+}
 
 uint64_t BuiltinAuthorizer::Now() const { return config_.unix_ms ? config_.unix_ms() : UnixTimeMs(); }
 
@@ -77,6 +96,19 @@ Status BuiltinAuthorizer::Authorize(const AuthorizationRequest& request, Authori
                                   : "valid license required");
     }
 
+    // Integrity reports only ever lower trust.
+    checked.integrity_conditions = EvaluateIntegrityConditions(request, config_.integrity);
+    const uint32_t rejected = checked.integrity_conditions & config_.integrity.reject_mask;
+    if (rejected != 0) {
+        Deny(decision, "integrity policy").IgnoreError();
+        char detail[48];
+        std::snprintf(detail, sizeof(detail), " (conditions 0x%08x)", rejected);
+        decision->deny_reason += detail;
+        return OkStatus();
+    }
+    const bool restricted_by_integrity = (checked.integrity_conditions & config_.integrity.restrict_mask) != 0;
+    if (restricted_by_integrity) decision->policy = proto::SessionPolicy::kRestricted;
+
     decision->allow = true;
     if (config_.hook) {
         const Status st = config_.hook(checked, decision);
@@ -91,6 +123,8 @@ Status BuiltinAuthorizer::Authorize(const AuthorizationRequest& request, Authori
         decision->granted_features = 0;
         return OkStatus();
     }
+    // Integrity only ever lowers trust: the hook cannot lift the floor.
+    if (restricted_by_integrity) decision->policy = proto::SessionPolicy::kRestricted;
     if (decision->license_verified) return Commit(request, license_id, license.product_id, activate, decision);
     return OkStatus();
 }

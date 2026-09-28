@@ -61,6 +61,7 @@ Status ServerEngine::Create(EngineConfig config, EngineCallbacks callbacks, std:
     authz.registry = engine->registry_.get();
     authz.require_license = cfg.require_license;
     authz.allow_activation = cfg.allow_license_activation;
+    authz.integrity = cfg.integrity;
     authz.unix_ms = cfg.handshake.unix_ms;
     if (engine->callbacks_.authorize) {
         const ServerEngine* self = engine.get();
@@ -70,6 +71,11 @@ Status ServerEngine::Create(EngineConfig config, EngineCallbacks callbacks, std:
         };
     }
     engine->authorizer_ = std::make_unique<BuiltinAuthorizer>(std::move(authz));
+    if (!cfg.integrity.allowed_executables.empty() &&
+        ((cfg.integrity.reject_mask | cfg.integrity.restrict_mask) & kIntegrityUnknownExecutable) == 0) {
+        SG_LOGW(cfg.logger, "event=config_warning detail=\"executable allowlist has no effect: "
+                            "SG_INTEGRITY_UNKNOWN_EXECUTABLE is in neither integrity mask\"");
+    }
 
     HandshakeConfig hs = cfg.handshake;
     if (hs.token_key.empty()) {

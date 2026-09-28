@@ -6,6 +6,8 @@
 #include <sockgate/client.h>
 
 #include "crypto/key_store_factory.h"
+#include "sockgate_common/core/abi.h"
+#include "platform/integrity.h"
 #include "session/client_session.h"
 
 #include "sockgate_common/tls/tls.h"
@@ -53,10 +55,15 @@ bool CopyCString(const char* in, size_t max, std::string* out)
     return true;
 }
 
+SG_ASSERT_NO_TAIL_PADDING(SG_ClientConfig, reserved2);
+SG_ASSERT_NO_TAIL_PADDING(SG_ServerConfig, proof_keys);
+SG_ASSERT_NO_TAIL_PADDING(SG_ProxyConfig, password);
+
 Status ParseProxy(const SG_ProxyConfig* p, sg::client::ProxySettings* out)
 {
     if (p == nullptr) return sg::OkStatus();
     if (p->size < offsetof(SG_ProxyConfig, mode) + sizeof(p->mode) || p->version == 0) return SG_INVALID_ARGUMENT;
+    SG_TRY(sg::CheckUnknownTail(p, p->size, sizeof(SG_ProxyConfig)));
     out->mode = p->mode;
     if (out->mode > SG_PROXY_MODE_EXPLICIT) return SG_INVALID_ARGUMENT;
     if (out->mode != SG_PROXY_MODE_EXPLICIT) return sg::OkStatus();
@@ -80,6 +87,7 @@ Status ParseProxy(const SG_ProxyConfig* p, sg::client::ProxySettings* out)
 Status ParseClientConfig(const SG_ClientConfig* c, sg::client::ClientSettings* s)
 {
     if (c->version == 0 || !SG_HAS_FIELD(c, SG_ClientConfig, identity_name)) return SG_INVALID_ARGUMENT;
+    SG_TRY(sg::CheckUnknownTail(c, c->size, sizeof(SG_ClientConfig)));
     if (!CopyCString(c->identity_name, 128, &s->identity_name)) return SG_INVALID_ARGUMENT;
     SG_TRY(sg::client::ValidateKeyName(s->identity_name));
 
@@ -87,6 +95,16 @@ Status ParseClientConfig(const SG_ClientConfig* c, sg::client::ClientSettings* s
     std::string key_store_path;
     if (SG_HAS_FIELD(c, SG_ClientConfig, key_store_type)) key_store_type = c->key_store_type;
     if (SG_HAS_FIELD(c, SG_ClientConfig, flags)) s->flags = c->flags;
+    // Refuse flags this build cannot honour instead of silently ignoring them.
+    constexpr uint32_t kKnownFlags = SG_CLIENT_FLAG_APP_ENCRYPTION | SG_CLIENT_FLAG_ALLOW_TLS12 |
+                                     SG_CLIENT_FLAG_AUTO_IDENTITY | SG_CLIENT_FLAG_INTEGRITY_REPORT |
+                                     SG_CLIENT_FLAG_AUTO_REFRESH;
+    if ((s->flags & ~kKnownFlags) != 0) return SG_NOT_SUPPORTED;
+    if ((s->flags & SG_CLIENT_FLAG_INTEGRITY_REPORT) != 0) {
+        // Hash the executable now, not on the (timed) authentication path.
+        sg::proto::IntegrityReport warm;
+        sg::client::os::CollectIntegrityReport(&warm).IgnoreError();
+    }
     if (SG_HAS_FIELD(c, SG_ClientConfig, key_store_path) && !CopyCString(c->key_store_path, 4096, &key_store_path)) {
         return SG_INVALID_ARGUMENT;
     }
@@ -124,6 +142,7 @@ Status ParseClientConfig(const SG_ClientConfig* c, sg::client::ClientSettings* s
 Status ParseServerConfig(const SG_ServerConfig* c, sg::client::ServerTarget* t)
 {
     if (c->version == 0 || !SG_HAS_FIELD(c, SG_ServerConfig, port)) return SG_INVALID_ARGUMENT;
+    SG_TRY(sg::CheckUnknownTail(c, c->size, sizeof(SG_ServerConfig)));
     if (!CopyCString(c->host, 253, &t->host) || t->host.empty() || c->port == 0) return SG_INVALID_ARGUMENT;
     t->port = c->port;
     if (SG_HAS_FIELD(c, SG_ServerConfig, server_name) && !CopyCString(c->server_name, 253, &t->server_name)) {

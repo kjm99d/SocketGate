@@ -90,13 +90,17 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 | 관측 | 방법 | flag |
 |---|---|---|
 | 실행 파일 해시 | `/proc/self/exe` SHA-256 | (값 전송) |
-| SockGate .so 해시 | `dladdr` → 경로 → SHA-256 | (값 전송) |
+| SockGate .so 해시 | 로더의 세그먼트 맵(`dl_iterate_phdr`)에서 SockGate 코드가 든 객체 → 절대 경로의 일반 파일만 SHA-256 (실행 파일에 정적 링크되면 실행 파일 해시) | (값 전송) |
 | Build ID | `dl_iterate_phdr` → `PT_NOTE` → `NT_GNU_BUILD_ID` | (값 전송) |
 | LD_PRELOAD / LD_AUDIT | `getenv` + `/etc/ld.so.preload` 존재 | `PRELOAD_PRESENT` |
 | Tracer | `/proc/self/status` 의 `TracerPid != 0` | `DEBUGGER_PRESENT` |
-| ASLR | `/proc/sys/kernel/randomize_va_space < 2` | `ASLR_DISABLED` |
+| ASLR | `randomize_va_space == 0`, `personality()` 의 `ADDR_NO_RANDOMIZE` (`setarch -R`, 디버거), 또는 실행 파일이 PIE 아님 (ELF `ET_EXEC`) | `ASLR_DISABLED` |
 | 실행 파일 권한 | group/other 쓰기 가능 | `EXECUTABLE_WRITABLE` |
-| 로드된 .so | `dl_iterate_phdr` 로 목록, 쓰기 가능 경로 / `/tmp` 경로 탐지 | `UNEXPECTED_MODULES` |
+| 로드된 코드 | 실행 파일과 `.so` 목록(`dl_iterate_phdr`, 로더 lock 밖에서 검사): `/tmp/`·`/var/tmp/`·`/dev/shm/`·`/memfd:` 또는 world-writable 파일 | `UNEXPECTED_MODULES` |
+| 해시 실패 | 파일을 읽지 못함 | `HASH_UNAVAILABLE` |
+
+파일 해시는 프로세스당 1회 계산해 캐시하고, 나머지 관측은 인증마다 다시 평가한다. 모든 관측은 우회 가능하며
+서버 정책의 입력일 뿐이다 (09 §5.2).
 
 ## 5. 빌드 Hardening (GCC / Clang)
 
@@ -110,6 +114,7 @@ Worker thread × N: epoll_wait → 준비된 fd 의 read/write 수행 → comple
 | `-fcf-protection=full` (x86_64) / `-mbranch-protection=standard` (ARM64) | CET / BTI+PAC |
 | `-fstack-clash-protection` | stack clash |
 | `-fvisibility=hidden -fvisibility-inlines-hidden` | export 최소화 |
+| `-Wl,--version-script=cmake/sockgate_exports.map` (`SG_*` 만 global) | 약한 C++ 템플릿 심볼까지 비노출. CTest `sg_exports_*` 가 `nm -D` 로 검증 |
 | `-Wl,--exclude-libs,ALL` | 정적 링크한 OpenSSL 심볼 비노출 |
 | Release: `-s` 또는 `strip --strip-unneeded` | 심볼 제거 |
 | `-Wall -Wextra -Wconversion -Wshadow -Wformat=2` | 경고 |

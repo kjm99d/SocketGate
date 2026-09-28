@@ -1,5 +1,6 @@
 #include "session/client_session.h"
 
+#include "platform/integrity.h"
 #include "transport/tcp_transport.h"
 #include "transport/transport_factory.h"
 
@@ -309,6 +310,12 @@ Status ClientSession::Authenticate(const std::string* enrollment_token)
 
     ClientHandshakeConfig hs_config = settings_.handshake;
     hs_config.server_proof_keys = target_.proof_keys;
+    if ((settings_.flags & SG_CLIENT_FLAG_INTEGRITY_REPORT) != 0) {
+        // Fresh observations for every authentication (file hashes are cached).
+        st = os::CollectIntegrityReport(&hs_config.integrity);
+        if (!st.ok()) return Fail(gen, st);
+        hs_config.has_integrity = true;
+    }
     ClientHandshake handshake(hs_config, *settings_.key_store, settings_.identity_name);
 
     Bytes out;

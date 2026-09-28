@@ -19,11 +19,13 @@ set(SG_CLIENT_CORE_SOURCES
 if(SOCKGATE_PLATFORM STREQUAL "windows")
     list(APPEND SG_CLIENT_CORE_SOURCES
         src/platform/windows/cng_key_store.cpp
+        src/platform/windows/integrity_win.cpp
         src/platform/windows/key_file_win.cpp
         src/platform/windows/system_proxy_win.cpp
     )
 else()
     list(APPEND SG_CLIENT_CORE_SOURCES
+        src/platform/linux/integrity_linux.cpp
         src/platform/linux/key_file_posix.cpp
         src/platform/linux/system_proxy_linux.cpp
     )
@@ -51,7 +53,9 @@ if(SOCKGATE_PLATFORM STREQUAL "windows")
         crypt32    # DPAPI
         advapi32   # token / security descriptors
         shell32    # known folders
-        ole32)     # CoTaskMemFree
+        ole32      # CoTaskMemFree
+        wintrust   # Authenticode status (integrity report)
+        psapi)     # loaded modules (integrity report)
 endif()
 if(SOCKGATE_WITH_TPM2)
     find_package(PkgConfig REQUIRED)

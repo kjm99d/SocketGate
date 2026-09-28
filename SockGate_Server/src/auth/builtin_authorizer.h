@@ -11,8 +11,11 @@
 //     license features when the client requested none); the license expiry
 //     caps the session lifetime. Licenses unknown to the store grant nothing.
 //  4. REQUIRE_LICENSE denies every session without a verified license.
-//  5. The application hook refines the pre-filled decision.
-//  6. Only an allowed session takes a license seat (and activates); no free
+//  5. Integrity policy: reported observations plus server-side conditions
+//     (report missing, executable not allowlisted) can deny the session or
+//     restrict it; they never raise trust.
+//  6. The application hook refines the pre-filled decision.
+//  7. Only an allowed session takes a license seat (and activates); no free
 //     seat turns the decision into a denial.
 #pragma once
 
@@ -21,6 +24,7 @@
 #include "storage/license_store.h"
 
 #include <functional>
+#include <vector>
 
 namespace sg::server {
 
@@ -28,11 +32,25 @@ namespace sg::server {
 // and may change the pre-filled decision.
 using AuthorizeHook = std::function<Status(const AuthorizationRequest&, AuthorizationDecision*)>;
 
+struct IntegrityPolicy {
+    uint32_t restrict_mask = 0;  // conditions -> RESTRICTED
+    uint32_t reject_mask = 0;    // conditions -> denied
+    std::vector<crypto::Sha256Digest> allowed_executables;  // empty = no allowlist
+};
+
+// Server-side integrity conditions (same bits as the public SG_INTEGRITY_*).
+constexpr uint32_t kIntegrityReportMissing = 1u << 30;
+constexpr uint32_t kIntegrityUnknownExecutable = 1u << 31;
+
+// Reported observations (unknown bits dropped) plus server-side conditions.
+uint32_t EvaluateIntegrityConditions(const AuthorizationRequest& request, const IntegrityPolicy& policy);
+
 struct BuiltinAuthorizerConfig {
     ILicenseStore* licenses = nullptr;   // nullable: every license is then unknown
     IClientRegistry* registry = nullptr; // required for license activation
     bool require_license = false;
     bool allow_activation = false;       // claimed licenses may bind unbound installations
+    IntegrityPolicy integrity;
     std::function<uint64_t()> unix_ms;   // wall clock; default UnixTimeMs
     AuthorizeHook hook;                  // optional
 };

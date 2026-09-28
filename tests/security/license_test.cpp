@@ -10,6 +10,8 @@
 #include "sockgate_common/core/clock.h"
 #include "sockgate_common/protocol/transcript.h"
 
+#include <sockgate/types.h>
+
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -45,6 +47,9 @@ struct Fixture {
     bool require_license = false;
     bool allow_activation = true;
     AuthorizeHook hook;
+    IntegrityPolicy integrity;
+    bool has_report = false;
+    proto::IntegrityReport report;
     proto::InstallationId current{};  // installation the next Run() authorises
 
     Fixture() { current = AddInstallation(); }
@@ -80,12 +85,15 @@ struct Fixture {
         r.license_id = license;
         r.has_requested_features = has_features;
         r.requested_features = features;
+        r.has_integrity = has_report;
+        r.integrity = report;
 
         BuiltinAuthorizerConfig cfg;
         cfg.licenses = store.get();
         cfg.registry = registry.get();
         cfg.require_license = require_license;
         cfg.allow_activation = allow_activation;
+        cfg.integrity = integrity;
         cfg.unix_ms = []() { return kNow; };
         cfg.hook = hook;
         BuiltinAuthorizer authorizer(std::move(cfg));
@@ -508,4 +516,92 @@ SG_TEST(Authorization, HookSeesVerifiedLicenseAndMayRefine)
     SG_EXPECT(!d.allow);
     SG_EXPECT_EQ(d.granted_features, uint64_t{0});
     SG_EXPECT_EQ(d.deny_reason, std::string("application callback failed"));
+}
+
+SG_TEST(Authorization, IntegrityReportsOnlyLowerTrust)
+{
+    Fixture f;
+    crypto::Sha256Digest good{};
+    good.fill(0x11);
+    crypto::Sha256Digest bad{};
+    bad.fill(0x22);
+
+    // No policy: reports (or their absence) change nothing.
+    AuthorizationDecision d = f.Run("prod", "");
+    SG_EXPECT(d.allow);
+    SG_EXPECT(d.policy == proto::SessionPolicy::kNormal);
+
+    f.integrity.reject_mask = SG_INTEGRITY_DEBUGGER_PRESENT;
+    f.integrity.restrict_mask = SG_INTEGRITY_UNSIGNED_EXECUTABLE | kIntegrityReportMissing;
+    // Missing report -> restricted.
+    d = f.Run("prod", "");
+    SG_EXPECT(d.allow);
+    SG_EXPECT(d.policy == proto::SessionPolicy::kRestricted);
+
+    f.has_report = true;
+    f.report.platform = 1;
+    f.report.executable_sha256 = good;
+    // Clean report -> normal.
+    d = f.Run("prod", "");
+    SG_EXPECT(d.policy == proto::SessionPolicy::kNormal);
+    // Unsigned -> restricted, debugger -> denied (reject wins).
+    f.report.observation_flags = SG_INTEGRITY_UNSIGNED_EXECUTABLE;
+    d = f.Run("prod", "");
+    SG_EXPECT(d.allow && d.policy == proto::SessionPolicy::kRestricted);
+    f.report.observation_flags = SG_INTEGRITY_UNSIGNED_EXECUTABLE | SG_INTEGRITY_DEBUGGER_PRESENT;
+    d = f.Run("prod", "");
+    SG_EXPECT(!d.allow);
+    SG_EXPECT(d.deny_reason.find("integrity policy") == 0);
+    // Bits a client may not report (e.g. forged server conditions) are ignored.
+    f.report.observation_flags = 0xFFFFFE00u;
+    d = f.Run("prod", "");
+    SG_EXPECT(d.allow && d.policy == proto::SessionPolicy::kNormal);
+
+    // Allowlist of executables.
+    f.report.observation_flags = 0;
+    f.integrity.allowed_executables = {good};
+    f.integrity.reject_mask = kIntegrityUnknownExecutable;
+    SG_EXPECT(f.Run("prod", "").allow);
+    f.report.executable_sha256 = bad;
+    SG_EXPECT(!f.Run("prod", "").allow);
+    f.has_report = false;  // no report cannot pass an allowlist either
+    SG_EXPECT(!f.Run("prod", "").allow);
+}
+
+SG_TEST(Authorization, HookSeesIntegrityConditions)
+{
+    Fixture f;
+    f.integrity.restrict_mask = SG_INTEGRITY_PRELOAD_PRESENT;
+    uint32_t seen = 0;
+    f.hook = [&](const AuthorizationRequest& r, AuthorizationDecision* d) {
+        seen = r.integrity_conditions;
+        SG_EXPECT(d->policy == proto::SessionPolicy::kRestricted);
+        return OkStatus();
+    };
+    f.has_report = true;
+    f.report.observation_flags = SG_INTEGRITY_PRELOAD_PRESENT | SG_INTEGRITY_ASLR_DISABLED;
+    const AuthorizationDecision d = f.Run("prod", "");
+    SG_EXPECT(d.allow);
+    SG_EXPECT_EQ(seen, uint32_t{SG_INTEGRITY_PRELOAD_PRESENT | SG_INTEGRITY_ASLR_DISABLED});
+
+    // Integrity denials happen before the application hook runs.
+    f.integrity.reject_mask = SG_INTEGRITY_ASLR_DISABLED;
+    seen = 0;
+    SG_EXPECT(!f.Run("prod", "").allow);
+    SG_EXPECT_EQ(seen, uint32_t{0});
+}
+
+SG_TEST(Authorization, HookCannotLiftTheIntegrityFloor)
+{
+    Fixture f;
+    f.integrity.restrict_mask = SG_INTEGRITY_DEBUGGER_PRESENT;
+    f.has_report = true;
+    f.report.observation_flags = SG_INTEGRITY_DEBUGGER_PRESENT;
+    f.hook = [](const AuthorizationRequest&, AuthorizationDecision* d) {
+        d->policy = proto::SessionPolicy::kNormal;  // e.g. a per-user tier assignment
+        return OkStatus();
+    };
+    const AuthorizationDecision d = f.Run("prod", "");
+    SG_EXPECT(d.allow);
+    SG_EXPECT(d.policy == proto::SessionPolicy::kRestricted);
 }

@@ -41,6 +41,7 @@ struct AuthorizationRequest {
     // Filled by the built-in authorizer before the application hook runs:
     LicenseCheck license_status = LicenseCheck::kNone;
     uint64_t license_features = 0;  // entitlement of a verified license
+    uint32_t integrity_conditions = 0;  // reported flags + server-side conditions
 };
 
 struct AuthorizationDecision {
