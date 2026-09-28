@@ -33,11 +33,6 @@ if(SOCKGATE_SANITIZER)
         endif()
         add_compile_options(${_sg_san_flags} -fno-omit-frame-pointer -g)
         add_link_options(${_sg_san_flags})
-        if(SOCKGATE_SANITIZER MATCHES "undefined" AND CMAKE_C_COMPILER_ID MATCHES "Clang")
-            # C executables (the examples) link the C++ libraries, whose UBSan vptr checks need the
-            # C++ part of the runtime; the clang C driver leaves it out unless asked.
-            add_link_options("$<$<LINK_LANGUAGE:C>:-fsanitize-link-c++-runtime>")
-        endif()
     endif()
 endif()
 
