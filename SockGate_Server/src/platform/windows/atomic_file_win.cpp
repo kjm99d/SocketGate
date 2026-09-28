@@ -3,10 +3,12 @@
 #include "sockgate_common/crypto/crypto.h"
 
 #include <windows.h>
+#include <sddl.h>
 
 #include <algorithm>
 #include <climits>
 #include <cwchar>
+#include <vector>
 
 namespace sg::server {
 namespace {
@@ -24,9 +26,33 @@ struct HandleCloser {
     HANDLE h;
     ~HandleCloser()
     {
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        if (h != INVALID_HANDLE_VALUE && h != nullptr) CloseHandle(h);
     }
 };
+
+// Protected DACL: the current user, SYSTEM and Administrators only - storage
+// files (token keys, registries, licenses) never inherit a looser directory
+// ACL. LocalFree() the result.
+Status OwnerOnlySecurityDescriptor(PSECURITY_DESCRIPTOR* out)
+{
+    HandleCloser token{nullptr};
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.h)) return SG_STORAGE_ERROR;
+    DWORD size = 0;
+    GetTokenInformation(token.h, TokenUser, nullptr, 0, &size);
+    if (size == 0) return SG_STORAGE_ERROR;
+    std::vector<uint8_t> buf(size);
+    if (!GetTokenInformation(token.h, TokenUser, buf.data(), size, &size)) return SG_STORAGE_ERROR;
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(reinterpret_cast<const TOKEN_USER*>(buf.data())->User.Sid, &sid)) {
+        return SG_STORAGE_ERROR;
+    }
+    const std::wstring sddl = std::wstring(L"D:P(A;;FA;;;") + sid + L")(A;;FA;;;SY)(A;;FA;;;BA)";
+    LocalFree(sid);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, out, nullptr)) {
+        return SG_STORAGE_ERROR;
+    }
+    return OkStatus();
+}
 
 }  // namespace
 
@@ -69,8 +95,13 @@ Status WriteFileAtomically(const std::string& path, ByteView data)
              rnd[6], rnd[7]);
     const std::wstring tmp = wpath + suffix;
 
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SG_TRY(OwnerOnlySecurityDescriptor(&sd));
+    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
     {
-        HandleCloser file{CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        // The DACL set at creation stays with the file across the rename.
+        HandleCloser file{CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        LocalFree(sd);
         if (file.h == INVALID_HANDLE_VALUE) return SG_STORAGE_ERROR;
         size_t done = 0;
         while (done < data.size()) {

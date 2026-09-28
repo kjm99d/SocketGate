@@ -15,9 +15,10 @@ constexpr size_t kMaxStorageFileSize = 512u * 1024 * 1024;
 // SG_STORAGE_ERROR on I/O errors, symlinks (POSIX) or oversized files.
 Status ReadWholeFile(const std::string& path, Bytes* out);
 
-// Writes `data` to a new temporary file next to `path` (owner-only
-// permissions on POSIX), flushes it to stable storage and atomically
-// replaces `path`. Readers observe either the old or the new content.
+// Writes `data` to a new temporary file next to `path` with owner-only
+// access (POSIX mode 0600; Windows: protected DACL for the user, SYSTEM and
+// Administrators), flushes it to stable storage and atomically replaces
+// `path`. Readers observe either the old or the new content.
 Status WriteFileAtomically(const std::string& path, ByteView data);
 
 }  // namespace sg::server

@@ -7,6 +7,7 @@
 #include "auth/client_handshake.h"
 #include "auth/server_handshake.h"
 #include "crypto/key_store.h"
+#include "storage/atomic_file.h"
 #include "storage/client_registry.h"
 #include "support/test_pki.h"
 
@@ -16,6 +17,11 @@
 #include "sockgate_common/core/clock.h"
 
 #include <atomic>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <aclapi.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -695,3 +701,35 @@ SG_TEST(Registry, FilePersistenceAndCorruption)
     }
     fs::remove_all(dir);
 }
+
+#ifdef _WIN32
+SG_TEST(Registry, StorageFilesAreOwnerOnly)
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("sockgate-acl-" + std::to_string(sg::MonotonicMs()));
+    fs::create_directories(dir);
+    const std::string path = (dir / "store.bin").string();
+    const uint8_t data[] = {1, 2, 3};
+    SG_ASSERT_OK(WriteFileAtomically(path, ByteView(data, sizeof(data))));
+
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    PACL dacl = nullptr;
+    SG_ASSERT(GetNamedSecurityInfoA(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                                    nullptr, &sd) == ERROR_SUCCESS);
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    SG_EXPECT(GetSecurityDescriptorControl(sd, &control, &revision));
+    SG_EXPECT((control & SE_DACL_PROTECTED) != 0);  // nothing inherited from the directory
+    SG_ASSERT(dacl != nullptr);
+    SG_EXPECT_EQ(dacl->AceCount, WORD{3});  // user, SYSTEM, Administrators
+    for (DWORD i = 0; i < dacl->AceCount; ++i) {
+        void* ace = nullptr;
+        SG_ASSERT(GetAce(dacl, i, &ace));
+        PSID sid = &static_cast<ACCESS_ALLOWED_ACE*>(ace)->SidStart;
+        SG_EXPECT(!IsWellKnownSid(sid, WinBuiltinUsersSid) && !IsWellKnownSid(sid, WinWorldSid) &&
+                  !IsWellKnownSid(sid, WinAuthenticatedUserSid));
+    }
+    LocalFree(sd);
+    fs::remove_all(dir);
+}
+#endif
