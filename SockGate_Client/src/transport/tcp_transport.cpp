@@ -62,10 +62,12 @@ Status TcpTransport::Connect(const net::Endpoint& endpoint)
         if (connected_ || socket_ != platform::kInvalidSocket) return SG_INVALID_STATE;
     }
 
+    // Name resolution counts against the connect budget (a resolver call
+    // itself cannot be interrupted, but no connect starts after the budget).
+    const Deadline deadline(options_.connect_timeout_ms);
     std::vector<platform::SocketAddress> addresses;
     SG_TRY(platform::ResolveAddresses(endpoint.host, endpoint.port, false, &addresses));
 
-    const Deadline deadline(options_.connect_timeout_ms);
     Status last = SG_NETWORK_ERROR;
     for (const auto& address : addresses) {
         if (deadline.Expired()) return SG_TIMEOUT;

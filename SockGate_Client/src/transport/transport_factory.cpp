@@ -27,6 +27,9 @@ Status CreateConnectedTransport(const TransportRequest& request, std::shared_ptr
 {
     if (out == nullptr) return SG_INVALID_ARGUMENT;
     const uint32_t mode = request.proxy != nullptr ? request.proxy->mode : SG_PROXY_MODE_DIRECT;
+    // The connect timeout covers the system proxy lookup, name resolution, the
+    // TCP connect and the proxy negotiation.
+    const Deadline deadline(request.connect_timeout_ms);
 
     // Resolve which proxy (if any) applies. DIRECT never consults the system.
     bool use_proxy = false;
@@ -49,10 +52,9 @@ Status CreateConnectedTransport(const TransportRequest& request, std::shared_ptr
         return SG_INVALID_ARGUMENT;
     }
 
-    // The connect timeout covers the TCP connect and the proxy negotiation.
-    const Deadline deadline(request.connect_timeout_ms);
+    if (deadline.Expired()) return SG_TIMEOUT;
     TcpTransportOptions options;
-    options.connect_timeout_ms = request.connect_timeout_ms;
+    options.connect_timeout_ms = deadline.infinite() ? 0u : std::max<uint32_t>(1, deadline.RemainingMs(UINT32_MAX));
     // Session I/O timeout; proxy negotiation reads are bounded separately by
     // `deadline` (the connect timeout).
     options.io_timeout_ms = request.io_timeout_ms;
