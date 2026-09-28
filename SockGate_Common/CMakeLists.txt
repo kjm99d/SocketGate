@@ -5,6 +5,15 @@ set(SG_COMMON_SOURCES
     src/sockgate_common/core/bytes.cpp
     src/sockgate_common/core/log.cpp
     src/sockgate_common/crypto/openssl_crypto.cpp
+    src/sockgate_common/protocol/enrollment_token.cpp
+    src/sockgate_common/protocol/frame.cpp
+    src/sockgate_common/protocol/messages.cpp
+    src/sockgate_common/protocol/rules.cpp
+    src/sockgate_common/protocol/transcript.cpp
+    src/sockgate_common/serialization/base64.cpp
+    src/sockgate_common/serialization/reader.cpp
+    src/sockgate_common/serialization/tlv.cpp
+    src/sockgate_common/serialization/writer.cpp
     src/sockgate_common/tls/openssl_tls.cpp
 )
 

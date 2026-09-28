@@ -57,7 +57,7 @@ if(SOCKGATE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-if(SOCKGATE_BUILD_FUZZERS)
+if(SOCKGATE_BUILD_FUZZERS OR SOCKGATE_BUILD_TESTS)
     add_subdirectory(fuzz)
 endif()
 

@@ -34,6 +34,17 @@ if(SOCKGATE_SANITIZER)
     endif()
 endif()
 
+# With fuzzers enabled, all code (not just the harness) gets coverage
+# instrumentation so libFuzzer can steer into the parsers.
+if(SOCKGATE_BUILD_FUZZERS)
+    if(MSVC)
+        add_compile_options(/fsanitize-coverage=inline-8bit-counters /fsanitize-coverage=edge
+                            /fsanitize-coverage=trace-cmp /fsanitize-coverage=trace-div)
+    else()
+        add_compile_options(-fsanitize=fuzzer-no-link)
+    endif()
+endif()
+
 # sockgate_enable_fuzzer(<target>)
 function(sockgate_enable_fuzzer target)
     if(MSVC)

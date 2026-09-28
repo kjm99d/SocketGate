@@ -34,6 +34,11 @@ sockgate_add_test(sg_unit_tls
     SOURCES unit/tls_test.cpp
     LIBS sg_test_support)
 
+sockgate_add_test(sg_protocol
+    LABEL protocol
+    SOURCES protocol/serialization_test.cpp protocol/frame_test.cpp protocol/messages_test.cpp
+    LIBS sockgate_common)
+
 sockgate_add_test(sg_integration_transport
     LABEL integration
     SOURCES integration/transport_test.cpp integration/tls_transport_test.cpp
