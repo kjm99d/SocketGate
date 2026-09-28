@@ -365,6 +365,10 @@ Status ClientSession::Authenticate(const std::string* enrollment_token)
     }
 
     EnrollmentMaterial enrollment;
+    struct WipeKey {
+        crypto::Sha256Digest& key;
+        ~WipeKey() { SecureZero(key.data(), key.size()); }
+    } wipe_k_tok{enrollment.k_tok};  // K_tok is secret: wiped on every return path
     if (enrollment_token != nullptr) {
         SG_TRY(proto::ParseEnrollmentToken(*enrollment_token, &enrollment.token_pub, &enrollment.k_tok));
     }
