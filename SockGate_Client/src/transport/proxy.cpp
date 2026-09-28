@@ -1,6 +1,7 @@
 #include "transport/proxy.h"
 
 #include "sockgate_common/serialization/base64.h"
+#include "sockgate_common/serialization/writer.h"
 
 #include <sockgate/config.h>
 
@@ -118,7 +119,8 @@ Status NegotiateHttpConnect(net::ITransport& transport, const std::string& host,
     const std::string authority = (ipv6 ? "[" + host + "]" : host) + ":" + std::to_string(port);
     std::string request = "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n";
     if (!username.empty()) {
-        SecureBytes credentials(username.begin(), username.end());
+        const ByteView user = ser::AsBytes(username);
+        SecureBytes credentials(user.begin(), user.end());
         credentials.push_back(':');
         credentials.insert(credentials.end(), password.begin(), password.end());
         std::string encoded;
@@ -169,9 +171,11 @@ Status NegotiateSocks4a(net::ITransport& transport, const std::string& host, uin
         return SG_INVALID_ARGUMENT;
     }
     Bytes req = {0x04, 0x01, static_cast<uint8_t>(port >> 8), static_cast<uint8_t>(port), 0x00, 0x00, 0x00, 0x01};
-    req.insert(req.end(), user_id.begin(), user_id.end());
+    const ByteView user = ser::AsBytes(user_id);
+    const ByteView name = ser::AsBytes(host);
+    req.insert(req.end(), user.begin(), user.end());
     req.push_back(0x00);
-    req.insert(req.end(), host.begin(), host.end());
+    req.insert(req.end(), name.begin(), name.end());
     req.push_back(0x00);
     if (!transport.Send(req.data(), req.size()).ok()) return SG_PROXY_ERROR;
 
@@ -201,7 +205,8 @@ Status NegotiateSocks5(net::ITransport& transport, const std::string& host, uint
 
     if (with_auth) {
         SecureBytes auth = {0x01, static_cast<uint8_t>(username.size())};
-        auth.insert(auth.end(), username.begin(), username.end());
+        const ByteView user = ser::AsBytes(username);
+        auth.insert(auth.end(), user.begin(), user.end());
         auth.push_back(static_cast<uint8_t>(password.size()));
         auth.insert(auth.end(), password.begin(), password.end());
         if (!transport.Send(auth.data(), auth.size()).ok()) return SG_PROXY_ERROR;
@@ -211,7 +216,8 @@ Status NegotiateSocks5(net::ITransport& transport, const std::string& host, uint
     }
 
     Bytes req = {0x05, 0x01, 0x00, 0x03, static_cast<uint8_t>(host.size())};  // CONNECT, domain name
-    req.insert(req.end(), host.begin(), host.end());
+    const ByteView name = ser::AsBytes(host);
+    req.insert(req.end(), name.begin(), name.end());
     req.push_back(static_cast<uint8_t>(port >> 8));
     req.push_back(static_cast<uint8_t>(port));
     if (!transport.Send(req.data(), req.size()).ok()) return SG_PROXY_ERROR;
@@ -275,7 +281,8 @@ Status ParseProxyUrl(const std::string& url_in, ResolvedProxy* out)
         out->username = userinfo.substr(0, colon);
         if (colon != std::string::npos) {
             const std::string pw = userinfo.substr(colon + 1);
-            out->password.assign(pw.begin(), pw.end());
+            const ByteView bytes = ser::AsBytes(pw);
+            out->password.assign(bytes.begin(), bytes.end());
         }
         if (out->username.size() > kMaxProxyField || out->password.size() > kMaxProxyField) return SG_INVALID_ARGUMENT;
     }

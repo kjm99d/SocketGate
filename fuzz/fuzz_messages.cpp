@@ -6,6 +6,7 @@
 #include "sockgate_common/protocol/enrollment_token.h"
 #include "sockgate_common/protocol/messages.h"
 #include "sockgate_common/serialization/base64.h"
+#include "sockgate_common/serialization/writer.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -146,7 +147,8 @@ std::vector<std::vector<uint8_t>> SockGateFuzzSeeds()
 
     std::string token;
     (void)BuildEnrollmentToken(Bytes(32, 1), claims, &token);
-    add(10, Bytes(token.begin(), token.end()));
+    const ByteView token_bytes = sg::ser::AsBytes(token);
+    add(10, Bytes(token_bytes.begin(), token_bytes.end()));
     add(11, Bytes({'Q', 'U', 'J', 'D'}));
     return seeds;
 }

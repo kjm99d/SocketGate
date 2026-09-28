@@ -27,7 +27,8 @@ std::string FileName(const std::string& name) { return name + ".sgkey"; }
 Bytes Context(const std::string& name)
 {
     Bytes ctx(kContextPrefix, kContextPrefix + sizeof(kContextPrefix) - 1);
-    ctx.insert(ctx.end(), name.begin(), name.end());
+    const ByteView bytes = ser::AsBytes(name);
+    ctx.insert(ctx.end(), bytes.begin(), bytes.end());
     return ctx;
 }
 

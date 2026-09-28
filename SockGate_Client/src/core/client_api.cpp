@@ -6,6 +6,7 @@
 #include <sockgate/client.h>
 
 #include "crypto/key_store_factory.h"
+#include "sockgate_common/serialization/writer.h"
 #include "sockgate_common/core/abi.h"
 #include "platform/integrity.h"
 #include "session/client_session.h"
@@ -78,7 +79,8 @@ Status ParseProxy(const SG_ProxyConfig* p, sg::client::ProxySettings* out)
     if (SG_HAS_FIELD(p, SG_ProxyConfig, password) && p->password != nullptr) {
         std::string pw;
         if (!CopyCString(p->password, 255, &pw)) return SG_INVALID_ARGUMENT;
-        out->password.assign(pw.begin(), pw.end());
+        const sg::ByteView bytes = sg::ser::AsBytes(pw);
+        out->password.assign(bytes.begin(), bytes.end());
         sg::SecureZero(&pw[0], pw.size());
     }
     return sg::OkStatus();
