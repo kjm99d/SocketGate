@@ -112,7 +112,7 @@ typedef struct SG_ServerConfig {
     const char* ca_file;         /* PEM bundle path */
     const char* ca_pem;          /* PEM bundle in memory */
     size_t ca_pem_size;          /* 0 = NUL-terminated */
-    uint32_t flags;              /* SG_TRUST_SYSTEM_STORE | SG_SERVER_FLAG_* */
+    uint32_t flags;              /* SG_TRUST_SYSTEM_STORE | SG_SERVER_FLAG_*; others: SG_NOT_SUPPORTED */
     uint32_t spki_pin_count;     /* <= SG_MAX_PINS */
     const SG_Sha256* spki_pins;  /* SHA-256 of DER SubjectPublicKeyInfo */
     uint32_t proof_key_count;    /* <= SG_MAX_PROOF_KEYS */

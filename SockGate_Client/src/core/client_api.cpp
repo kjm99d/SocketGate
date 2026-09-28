@@ -158,6 +158,9 @@ Status ParseServerConfig(const SG_ServerConfig* c, sg::client::ServerTarget* t)
     }
     uint32_t flags = 0;
     if (SG_HAS_FIELD(c, SG_ServerConfig, flags)) flags = c->flags;
+    // As for SG_ClientConfig.flags: a trust flag this build does not know is
+    // refused, never silently ignored.
+    if ((flags & ~(SG_TRUST_SYSTEM_STORE | SG_SERVER_FLAG_ALLOW_NO_PINNING)) != 0) return SG_NOT_SUPPORTED;
     t->trust_system_store = (flags & SG_TRUST_SYSTEM_STORE) != 0;
     t->allow_no_pinning = (flags & SG_SERVER_FLAG_ALLOW_NO_PINNING) != 0;
     if (SG_HAS_FIELD(c, SG_ServerConfig, spki_pins) && c->spki_pin_count != 0) {

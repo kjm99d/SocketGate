@@ -203,6 +203,17 @@ SG_TEST(Integrity, UnknownClientFlagsAreRefused)
     SG_Client* client = nullptr;
     SG_EXPECT_STATUS(SG_Client_Create(&cfg, &client), SG_NOT_SUPPORTED);
     SG_EXPECT(client == nullptr);
+
+    // Unknown trust flags for the server connection are refused before any I/O.
+    cfg.flags = 0;
+    SG_ASSERT_OK(SG_Client_Create(&cfg, &client));
+    SG_ServerConfig target;
+    SG_ServerConfig_Init(&target);
+    target.host = "127.0.0.1";
+    target.port = 1;
+    target.flags = SG_SERVER_FLAG_ALLOW_NO_PINNING | (1u << 20);
+    SG_EXPECT_STATUS(SG_Client_Connect(client, &target), SG_NOT_SUPPORTED);
+    SG_Client_Destroy(client);
 }
 
 SG_TEST(Integrity, OptionsAreValidated)
